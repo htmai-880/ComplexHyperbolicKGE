@@ -17,12 +17,14 @@ from datasets.kg_dataset import KGDataset
 from models import all_models
 from optimizers.kg_optimizer import KGOptimizer
 from utils.train import get_savedir, avg_both, format_metrics, count_params
-from utils.complexhyperbolic import euclidean_update, poincare_grad, poincare_update, full_p_exp_map, p_sum, RiemannianSGD, rgrad, expm
+from utils.complexhyperbolic import euclidean_update, poincare_grad, poincare_update, full_p_exp_map, p_sum#, RiemannianSGD, rgrad, expm
 
 # set paths
-KGHOME='/ComplexHyperbolicKGE'
+# KGHOME='/ComplexHyperbolicKGE'
+KGHOME='./'
 LOG_DIR=os.path.join(KGHOME, 'logs')
-DATA_PATH = '/KGEdata'
+# DATA_PATH = '/KGEdata'
+DATA_PATH=os.path.join(KGHOME, 'data')
 
 parser = argparse.ArgumentParser(
     description="Knowledge Graph Embedding"

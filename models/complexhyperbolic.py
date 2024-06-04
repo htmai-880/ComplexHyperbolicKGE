@@ -155,3 +155,64 @@ class FFTAttH(FFTUnitBall):
             lhs_biases = lhs_biases.unsqueeze(1)
         return (res, c), lhs_biases
 
+
+class FFTIsoH(FFTUnitBall):
+    def __init__(self, args):
+        self.dim = 2 * (self.rank - 1)
+        del self.entity
+        self.entity = nn.Embedding(self.sizes[0], 2 * self.rank)
+        del self.rel
+        self.dim_iso = self.rank * (self.rank - 1) # d(d-1)/2 (*2 because of complex isometry)
+        self.rel = nn.Embedding(self.sizes[1], self.dim_iso + self.dim) # The rank should be: d(d-1) + 2*self.dim
+        # self.rel_diag = nn.Embedding(self.sizes[1], self.dim)
+        self.multi_c = args.multi_c
+        if self.multi_c:
+            self.c = nn.Embedding(self.sizes[1], 1)
+        else:
+            self.c = nn.Embedding(1, 1)
+
+        with torch.no_grad():
+            nn.init.normal_(self.entity.weight, 0.0, self.init_size)
+            nn.init.normal_(self.rel.weight, 0.0, self.init_size)
+            nn.init.uniform_(self.rel_diag.weight, -1.0, 1.0)
+            nn.init.ones_(self.c.weight)
+
+
+    def get_queries(self, queries):
+        """Compute embedding and biases of queries."""
+        c = F.softplus(self.c(queries[..., 1]))
+        rel_ = self.rel(queries[..., 1])   # Euclidean
+        iso, rel = rel_[...,:self.dim_iso], rel_[...,self.dim_iso:]
+
+        # iso is of size d(d-1)
+
+        rel = expmap0(rel, c)   # hyperbolic
+        head = self.entity(queries[..., 0])
+        head = head[..., :self.rank] + 1j * head[..., self.rank:]
+
+        # Make skew-symmetric Hermitean matrix
+        iso_real, iso_imag = torch.chunk(iso, 2, dim=-1)
+        batch_size = iso_real.size(0)
+        rank = head.size(-1)
+        skew = torch.zeros(batch_size, rank, rank, device=iso_real.device, dtype=head.dtype)
+        tril_indices = torch.tril_indices(rank, rank, offset=-1)
+        skew[:, tril_indices[0], tril_indices[1]] = iso_real + 1j * iso_imag
+        skew = skew - skew.transpose(-1, -2).conj()
+
+        # Apply isometry
+        head = torch.bmm(skew, head.unsqueeze(-1)).squeeze(-1)
+
+        head = torch.fft.irfft(head, norm="ortho")
+        # lhs = givens_reflection(self.rel_diag(queries[..., 1]), head)   # givens_reflection(Euclidean, Euclidean)
+        lhs = expmap0(lhs, c)   # hyperbolic
+        res = project(real_mobius_add(lhs, rel, c), c)   # hyperbolic
+        res = torch.fft.rfft(res, norm="ortho")
+        res = torch.cat((res.real, res.imag), -1)
+        lhs_biases = self.bh(queries[..., 0])
+        while res.dim() < 3:
+            res = res.unsqueeze(1)
+        while c.dim() < 3:
+            c = c.unsqueeze(1)
+        while lhs_biases.dim() < 3:
+            lhs_biases = lhs_biases.unsqueeze(1)
+        return (res, c), lhs_biases
