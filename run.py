@@ -60,6 +60,9 @@ parser.add_argument(
     "--rank", default=1000, type=int, help="Embedding dimension"
 )
 parser.add_argument(
+    "--hidden_dim", default=1000, type=int, help="Hidden dimension for GNNs"
+)
+parser.add_argument(
     "--batch_size", default=1000, type=int, help="Batch size"
 )
 parser.add_argument(
@@ -73,6 +76,12 @@ parser.add_argument(
 )
 parser.add_argument(
     "--dropout", default=0, type=float, help="Dropout rate"
+)
+parser.add_argument(
+    "--edge_dropout", default=0.3, type=float, help="Dropout rate on edges for GNNs"
+)
+parser.add_argument(
+    "--layers", default=2, type=int, help="Number of layers"
 )
 parser.add_argument(
     "--init_size", default=1e-3, type=float, help="Initial embeddings' scale"
@@ -90,7 +99,7 @@ parser.add_argument(
     "--dtype", default="double", type=str, choices=["float", "double", "cfloat", "cdouble", "single"], help="Machine precision"
 )
 parser.add_argument(
-    "--double_neg", type=int,
+    "--double_neg", action="store_true", default=False,
     help="Whether to negative sample both head and tail entities"
 )
 parser.add_argument(
@@ -147,10 +156,27 @@ def train(args):
         json.dump(vars(args), fjson)
 
     # create model
-    model = getattr(models, args.model)(args)
+    if "GCN" in args.model or "GAT" in args.model:
+        model = getattr(models, args.model)(args, dataset)
+    else:
+        model = getattr(models, args.model)(args)
     total = count_params(model)
     logging.info("Total number of parameters {}".format(total))
     model.cuda()
+    # print(model)
+    # print("Model parameters: ", dict(model.named_parameters()))
+    # print("Layer parameters: ", dict(model.layers[0].named_parameters()))
+
+
+    model.eval()
+
+    # Validation metrics
+    valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
+    logging.info(format_metrics(valid_metrics, split="valid"))
+
+    # Test metrics
+    test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
+    logging.info(format_metrics(test_metrics, split="test"))
 
     # get optimizer
     regularizer = getattr(regularizers, args.regularizer)(args.reg)
@@ -162,7 +188,7 @@ def train(args):
     best_mrr = None
     best_epoch = None
     logging.info("\t Start training")
-    for step in range(args.max_epochs):
+    for step in range(1, args.max_epochs+1):
 
         # Train step
         model.train()
@@ -174,7 +200,7 @@ def train(args):
         valid_loss = optimizer.calculate_valid_loss(valid_examples)
         logging.info("\t Epoch {} | average valid loss: {:.4f}".format(step, valid_loss))
 
-        if (step + 1) % args.valid == 0:
+        if step % args.valid == 0:
             valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size)) 
             logging.info(format_metrics(valid_metrics, split="valid"))
 

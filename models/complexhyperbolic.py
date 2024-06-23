@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from torch import nn
 from abc import ABC, abstractmethod
 from models.base import KGModel
-from utils.complexhyperbolic import chyp_distance, expmap0, logmap0, project, mobius_add, Distance, real_mobius_add
-from utils.euclidean import givens_rotations, givens_reflection
+from utils.complexhyperbolic import chyp_distance, expmap0, logmap0, project, mobius_add, Distance, real_mobius_add, givens_isometry
+from utils.euclidean import givens_rotations, givens_reflection, givens_unitary
 
-CHYP_MODELS = ["FFTRotH", "FFTRefH", "FFTAttH"]
+CHYP_MODELS = ["FFTRotH", "FFTRefH", "FFTAttH", "FFTIsoH"]
 
 
 class FFTUnitBall(KGModel):
@@ -40,6 +40,7 @@ class FFTUnitBall(KGModel):
             nn.init.normal_(self.rel.weight, 0.0, self.init_size)
             nn.init.uniform_(self.rel_diag.weight, -1.0, 1.0)
             nn.init.ones_(self.c.weight)
+        self.lift = False
 
     def similarity_score(self, lhs_e, rhs_e):
         """Compute similarity scores or queries against targets in embedding space.
@@ -55,7 +56,21 @@ class FFTUnitBall(KGModel):
         # im_lhs = lhs_e[..., self.rank:]
         # re_rhs = rhs_e[..., :self.rank]
         # im_rhs = rhs_e[..., self.rank:]
-        return - Distance.apply(lhs_e, rhs_e) ** 2
+        return - Distance.apply(lhs_e, rhs_e, 1, self.lift) ** 2
+
+    def get_rhs(self, tails=None):
+        rhs_e, rhs_biases = super().get_rhs(tails=tails)
+        if self.lift:
+            return rhs_e, rhs_biases
+        rhs_real, rhs_imag = torch.chunk(rhs_e, 2, dim=-1)
+        ones = torch.ones(
+            (*rhs_e.shape[:-1], 1), dtype=rhs_real.dtype, device=rhs_real.device
+            )
+        zeros = torch.zeros_like(ones)
+        rhs_e = torch.cat([
+            rhs_real, ones, rhs_imag, zeros
+        ], dim=-1)
+        return rhs_e, rhs_biases
 
 
 class FFTRotH(FFTUnitBall):
@@ -63,7 +78,7 @@ class FFTRotH(FFTUnitBall):
 
     def get_queries(self, queries):
         """Compute embedding and biases of queries."""
-        c = F.softplus(self.c(queries[..., 1]))
+        c = F.softplus(self.c(queries[..., 1])) if self.multi_c else self.c.weight
         head = self.entity(queries[..., 0])
         head = head[..., :self.rank] + 1j * head[..., self.rank:]
         head = torch.fft.irfft(head, norm="ortho")
@@ -91,7 +106,7 @@ class FFTRefH(FFTUnitBall):
 
     def get_queries(self, queries):
         """Compute embedding and biases of queries."""
-        c = F.softplus(self.c(queries[..., 1]))
+        c = F.softplus(self.c(queries[..., 1])) if self.multi_c else self.c.weight
         rel, _ = torch.chunk(self.rel(queries[..., 1]), 2, dim=-1)   # Euclidean
         rel = expmap0(rel, c)   # hyperbolic
         head = self.entity(queries[..., 0])
@@ -128,7 +143,7 @@ class FFTAttH(FFTUnitBall):
 
     def get_queries(self, queries):
         """Compute embedding and biases of queries."""
-        c = F.softplus(self.c(queries[..., 1]))
+        c = F.softplus(self.c(queries[..., 1])) if self.multi_c else self.c.weight
         head = self.entity(queries[..., 0])
         head = head[..., :self.rank] + 1j * head[..., self.rank:]
         head = torch.fft.irfft(head, norm="ortho")
@@ -158,55 +173,56 @@ class FFTAttH(FFTUnitBall):
 
 class FFTIsoH(FFTUnitBall):
     def __init__(self, args):
-        self.dim = 2 * (self.rank - 1)
+        super(FFTUnitBall, self).__init__(args.sizes, args.rank, args.dropout, args.gamma, args.dtype, args.bias,
+                                args.init_size)
+        self.dim = 2 * (self.rank - 1) # This is even. We want self.rank to be even too, so we will pick self.rank = 32
         del self.entity
-        self.entity = nn.Embedding(self.sizes[0], 2 * self.rank)
+        self.entity = nn.Embedding(self.sizes[0], 2 * self.rank) # Complex embedding of dimension self.rank
         del self.rel
-        self.dim_iso = self.rank * (self.rank - 1) # d(d-1)/2 (*2 because of complex isometry)
-        self.rel = nn.Embedding(self.sizes[1], self.dim_iso + self.dim) # The rank should be: d(d-1) + 2*self.dim
-        # self.rel_diag = nn.Embedding(self.sizes[1], self.dim)
+        self.rel = nn.Embedding(self.sizes[1], self.dim)
+        self.rel_diag = nn.Embedding(self.sizes[1], 3 * self.rank) # 3 complex embeddings of dimension self.rank/2
+        # self.abelian = nn.Embedding(self.sizes[1], self.rank//2)
+        # self.nilpotent = nn.Embedding(self.sizes[1], self.rank)
         self.multi_c = args.multi_c
         if self.multi_c:
             self.c = nn.Embedding(self.sizes[1], 1)
         else:
             self.c = nn.Embedding(1, 1)
 
+        self.lift = True
+
         with torch.no_grad():
             nn.init.normal_(self.entity.weight, 0.0, self.init_size)
             nn.init.normal_(self.rel.weight, 0.0, self.init_size)
-            nn.init.uniform_(self.rel_diag.weight, -1.0, 1.0)
+            nn.init.normal_(self.rel_diag.weight, 0.0, self.init_size)
             nn.init.ones_(self.c.weight)
-
 
     def get_queries(self, queries):
         """Compute embedding and biases of queries."""
-        c = F.softplus(self.c(queries[..., 1]))
-        rel_ = self.rel(queries[..., 1])   # Euclidean
-        iso, rel = rel_[...,:self.dim_iso], rel_[...,self.dim_iso:]
-
-        # iso is of size d(d-1)
-
+        c = F.softplus(self.c(queries[..., 1])) if self.multi_c else self.c.weight
+        rel = self.rel(queries[..., 1])   # Euclidean
         rel = expmap0(rel, c)   # hyperbolic
         head = self.entity(queries[..., 0])
-        head = head[..., :self.rank] + 1j * head[..., self.rank:]
-
-        # Make skew-symmetric Hermitean matrix
-        iso_real, iso_imag = torch.chunk(iso, 2, dim=-1)
-        batch_size = iso_real.size(0)
-        rank = head.size(-1)
-        skew = torch.zeros(batch_size, rank, rank, device=iso_real.device, dtype=head.dtype)
-        tril_indices = torch.tril_indices(rank, rank, offset=-1)
-        skew[:, tril_indices[0], tril_indices[1]] = iso_real + 1j * iso_imag
-        skew = skew - skew.transpose(-1, -2).conj()
+        head = head[..., :self.rank] + 1j * head[..., self.rank:] # (*, rank)
 
         # Apply isometry
-        head = torch.bmm(skew, head.unsqueeze(-1)).squeeze(-1)
-
+        unitary = self.rel_diag(queries[..., 1])
+        # abelian = self.abelian(queries[..., 1])
+        # nilpotent = self.nilpotent(queries[..., 1])
+        if self.lift:
+            a, b, angles = torch.chunk(unitary, 3, dim=-1)
+            head = givens_unitary(a, b, angles, head, lift=False)
+        else:
+            head, det = givens_isometry(unitary, None, None, head, lift=True)
         head = torch.fft.irfft(head, norm="ortho")
-        # lhs = givens_reflection(self.rel_diag(queries[..., 1]), head)   # givens_reflection(Euclidean, Euclidean)
-        lhs = expmap0(lhs, c)   # hyperbolic
+
+        lhs = expmap0(head, c)   # hyperbolic
+        lhs = head
         res = project(real_mobius_add(lhs, rel, c), c)   # hyperbolic
         res = torch.fft.rfft(res, norm="ortho")
+        if not self.lift:
+            res = torch.cat([res, det], -1)
+            assert res.size(-1) == self.rank + 1
         res = torch.cat((res.real, res.imag), -1)
         lhs_biases = self.bh(queries[..., 0])
         while res.dim() < 3:

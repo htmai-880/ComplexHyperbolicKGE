@@ -5,8 +5,11 @@ from numpy import isin
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch import overrides
 import gc
+
+from .monotonic import MonotonicMLP
 
 
 class KGModel(nn.Module, ABC):
@@ -44,6 +47,10 @@ class KGModel(nn.Module, ABC):
         self.bias = bias
         self.init_size = init_size
         self.gamma = gamma
+        # self.gamma = nn.Parameter(torch.zeros(1, dtype=self.data_type), requires_grad=True) if bias != "constant" else 0
+        # self.delta = nn.Parameter(torch.ones(1, dtype=self.data_type), requires_grad=True) if bias != "constant" else 1
+        # self.calibration = MonotonicMLP(1, 1, 8, dtype=self.data_type)
+        
         self.entity = nn.Embedding(sizes[0], self.rank)
         self.rel = nn.Embedding(sizes[1], self.rank)
         self.bh = nn.Embedding(sizes[0], 1)
@@ -54,6 +61,9 @@ class KGModel(nn.Module, ABC):
             nn.init.normal_(self.rel.weight, 0.0, self.init_size)
             nn.init.zeros_(self.bh.weight)
             nn.init.zeros_(self.bt.weight)
+            # if self.bias != "constant":
+                # nn.init.zeros_(self.gamma)
+                # nn.init.ones_(self.delta)
 
     def register_buffer(self, name, tensor, persistent=True):
         with torch.no_grad():
@@ -153,8 +163,11 @@ class KGModel(nn.Module, ABC):
         rhs_e, rhs_biases = rhs
         score = self.similarity_score(lhs_e, rhs_e)
         if self.bias == 'constant':
-            return self.gamma + score
+            return torch.abs(self.delta) * score + self.gamma
         elif self.bias == 'learn':
+            # return torch.abs(self.delta) * (lhs_biases + rhs_biases + score)
+            # return lhs_biases + rhs_biases + score + self.gamma
+            # return self.calibration(lhs_biases + rhs_biases + score)
             return lhs_biases + rhs_biases + score
         else:
             return score
@@ -237,10 +250,10 @@ class KGModel(nn.Module, ABC):
                 # mask = mask.to(device)
                 these_queries = these_queries.to(device)
 
-                q = self.get_queries(these_queries[..., :2])
-                rhs = self.get_rhs(these_queries[..., 2])
-                scores = self.score(q, candidates)
-                targets = self.score(q, rhs)
+                q = self.get_queries(these_queries[..., :2]) # (batch_size, 1, d)
+                rhs = self.get_rhs(these_queries[..., 2]) # (batch_size, 1, d)
+                scores = self.score(q, candidates) # (batch_size, 1, 1)
+                targets = self.score(q, rhs) # ???
                 # scores.masked_fill_(mask.unsqueeze(-1), -1e6)
                 
                 # set filtered and true scores to -1e6 to be ignored

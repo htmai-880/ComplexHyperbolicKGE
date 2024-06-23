@@ -4,6 +4,7 @@
 
 import torch
 from torch.optim.optimizer import Optimizer, required
+from .euclidean import givens_unitary
 from torch.autograd import Function
 import sys
 
@@ -123,7 +124,7 @@ def mobius_add(x, y):
 
 # ################# HYP DISTANCES ########################
 # c is set to be 1
-def chyp_distance(z, w, c=1):
+def chyp_distance(z, w, c=1, lift=True):
     """Complex hyperbolic distance on the unit ball with curvature c.
 
     Args:
@@ -135,10 +136,10 @@ def chyp_distance(z, w, c=1):
             else B x n_entities matrix with all pairs distances
     """
     eps = BALL_EPS[z.real.dtype]
-    zw = HermitianSig(z, w)   # size: B*1 otherwise
+    zw = HermitianSig(z, w, lift=lift)   # size: B*1 otherwise
     wz = conjugate(zw)   # size: B*1 otherwise
-    znorm = torch.clamp(HermitianNorm(z), min=-1, max=-eps)   # size: B*1
-    wnorm = torch.clamp(HermitianNorm(w), min=-1, max=-eps)   # size: B*1
+    znorm = torch.clamp(HermitianNorm(z, lift=lift), min=-1, max=-eps)   # size: B*1
+    wnorm = torch.clamp(HermitianNorm(w, lift=lift), min=-1, max=-eps)   # size: B*1
     x = torch.add(2 * (zw * wz).real / znorm.expand_as(zw) / wnorm.expand_as(zw), -1)   # size: B*1
     if torch.sum(torch.isnan(x)):
         print('The distance has NaN.')
@@ -172,16 +173,19 @@ def hyp_distance_multi_c(x, v, c):
     return 2 * dist / sqrt_c
 
 
-def HermitianSig(z, w):
-    return torch.add(torch.sum(z * conjugate(w), dim=-1, keepdim=True), -1)
+def HermitianSig(z, w, lift=True):
+    if lift:
+        return torch.add(torch.sum(z * conjugate(w), dim=-1, keepdim=True), -1)
+    w[..., -1].mul_(-1)
+    return torch.sum(z * conjugate(w), dim=-1, keepdim=True)
 
 
 def conjugate(z):
     return torch.conj(z)
 
 
-def HermitianNorm(z):
-    return HermitianSig(z, z).real
+def HermitianNorm(z, lift=True):
+    return HermitianSig(z, z, lift=lift).real
 
 
 class Distance(Function):
@@ -206,7 +210,7 @@ class Distance(Function):
         return grad_real, grad_imag
 
     @staticmethod
-    def forward(ctx, lhs_e, rhs_e, c=1):
+    def forward(ctx, lhs_e, rhs_e, c=1, lift=True):
         """Complex hyperbolic distance on the unit ball with curvature c.
 
         Args:
@@ -221,10 +225,11 @@ class Distance(Function):
         rank = lhs_e.size(-1) // 2
         z = lhs_e[..., :rank] + lhs_e[..., rank:] * 1j
         w = rhs_e[..., :rank] + rhs_e[..., rank:] * 1j
-        zw = HermitianSig(z, w)   # size: B*1
+
+        zw = HermitianSig(z, w, lift=lift)   # size: B*1
         wz = conjugate(zw)   # size: B*1
-        znorm = torch.clamp(HermitianNorm(z), min=-1, max=-eps)   # size: B*1
-        wnorm = torch.clamp(HermitianNorm(w), min=-1, max=-eps)   # size: B*1
+        znorm = torch.clamp(HermitianNorm(z, lift=lift), min=-1, max=-eps)   # size: B*1
+        wnorm = torch.clamp(HermitianNorm(w, lift=lift), min=-1, max=-eps)   # size: B*1
         x = torch.add(2 * (zw * wz).real / znorm.expand_as(zw) / wnorm.expand_as(zw), -1)   # size: B*1
         x = torch.clamp(x, min=1 + eps)
         ctx.eps = eps
@@ -284,3 +289,62 @@ def poincare_update(p, d_p, lr):
     v = -lr * d_p
     p.data = full_p_exp_map(p.data, v)
     return p.data
+
+
+########################### ISOMETRIES ############################
+# The isometry group in the complex hyperbolic space H2 is PU(2, 1).
+# For a vector (z1, z2, 1) such that |z1|² + |z2|² < 1, the elements G of PU(2, 1)
+# can be decomposed, using the Iwasawa decompositoin, as G = KAN, where:
+# K = diag(U, det(U)-1) where U is 2x2 and unitary
+# A = diag(exp(t), exp(-t), 1)
+# N = 
+# [1  z  0.5|z|²]
+# [0  1  z.conj()]
+# [0  0  1]
+# For simplicity, we will use 1 instead of det(U)-1 (since we want the last coordinate to be 1)
+
+def givens_isometry(unitary, abelian=None, nilpotent=None, z=None, lift=False):
+    """Make an isometry of PU(2, 1) from the KAN decomposition
+
+    Parameters
+    ----------
+    unitary : tensor
+        Tensor of shape (N, 3d), 3 unitary parameters (real, complex dimension d/2 each).
+    abelian : tensor
+        Tensor of shape (N, d/2), 1 scaling parameter (real)
+    nilpotent : tensor
+        Tensor of shape (N, d), 1 parameter (real, complex dimension d/2)
+    z : tensor
+        Tensor of shape (N, d) of complex vectors to transform (complex, complex dimension d)
+    """
+    assert not z is None
+    a, b, angle = torch.chunk(unitary, 3, dim=-1)
+    initial_z_shape = z.size()
+
+    # Nilpotent and abelian
+    if nilpotent and abelian:
+        z_n = torch.chunk(nilpotent, 2, dim=-1)
+        z_n_squared = z_n[0]**2 + z_n[1]**2
+        z_n = z_n[0] + 1j * z_n[1] # (batch_size, ..., d/2)
+
+        e_t = torch.exp(abelian) # (batch_size, ..., d/2)
+
+        z = z.view(*z.shape[:-1], -1, 2) # (batch_size, ..., d/2, 2)
+        out = torch.zeros_like(z)
+
+        out[..., 0] = e_t * (z[..., 0] + z_n * z[..., 1] + 0.5 * z_n_squared)
+        out[..., 1] = (1/e_t) * (z[..., 1] + z_n.conj())
+    else:
+        out = z
+    if not lift:
+        out = givens_unitary(a, b, angle, out.view(initial_z_shape))
+
+        return out
+    
+    out, det = givens_unitary(a, b, angle, out.view(initial_z_shape), lift=True)
+    return out, det
+
+
+
+
+
