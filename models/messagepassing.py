@@ -130,9 +130,9 @@ class BaseGNN(nn.Module):
         self.n_layers = layers
         self.dropout = dropout
         self.dtype = dtype
-        self.kwargs_first_layer = kwargs_first_layer
-        self.kwargs_hidden_layer = kwargs_hidden_layer
-        self.kwargs_last_layer = kwargs_last_layer
+        self.kwargs_first_layer = kwargs_first_layer if isinstance(kwargs_first_layer, dict) else {}
+        self.kwargs_hidden_layer = kwargs_hidden_layer  if isinstance(kwargs_hidden_layer, dict) else {}
+        self.kwargs_last_layer = kwargs_last_layer  if isinstance(kwargs_last_layer, dict) else {}
 
         if self.n_layers == 1:
             self.layers.append(self.make_first_layer())
