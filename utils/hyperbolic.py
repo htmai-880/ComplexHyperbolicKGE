@@ -31,6 +31,11 @@ def artanh(x):
 def tanh(x):
     return x.clamp(-15, 15).tanh()
 
+def arcosh(x):
+    return torch.acosh(
+        x.clamp_min(1 + 1e-6)
+    )
+
 
 # ################# HYP OPS ########################
 
@@ -128,7 +133,7 @@ def logmap0_lorentz(y, c):
     sqrt_c = c ** 0.5
     y_norm = y.norm(dim=-1, p=2, keepdim=True).clamp_min(MIN_NORM)
     beta = sqrt_c * torch.sqrt(y_norm**2 + 1/c)
-    return (torch.arccosh(beta)/(torch.sqrt(beta**2 - 1))) * y
+    return (arcosh(beta)/(torch.sqrt(beta**2 - 1))) * y
 
 def lorentz_boost(y, v, c):
     """Lorentz boost with velocity v (ratio to the speed of light).
@@ -141,11 +146,19 @@ def lorentz_boost(y, v, c):
     Returns:
         torch.Tensor with hyperbolic points.
     """
+    # We will apply a transformation on v to make sure it has the right norm.
+    # we want norm(v) < 1.
+
+    norm_v = v.norm(dim=-1, p=2, keepdim=True)
+    v = v / (1+norm_v)
+
     y0 = torch.sum(y**2, dim=-1, keepdim=True) + 1/c
     y0 = torch.sqrt(y0)
     gamma = torch.sum(v**2, dim=-1, keepdim=True)
     gamma = (1 / torch.sqrt(1-gamma)).clamp_max(15)
     factor = (gamma**2 / (1+gamma))
+    assert not gamma.isnan().any()
+    assert not factor.isnan().any()
     vy = torch.sum(v * y, dim=-1, keepdim=True)
     res = - gamma * y0 * v + y + factor * vy * v
     return res
@@ -222,9 +235,15 @@ def hyp_distance_multi_c_lorentz(x, v, c):
     # v : (B, eta, d) or (1/B, N, d) 
     res = torch.sum(x * v, dim=-1, keepdim=True) # (B, eta, 1) or (B, N, 1)
     res  = res - (x0 * v0)
-    res = torch.arccosh(- c * res) / (c**0.5)
+    res = arcosh(- c * res) / (c**0.5)
     return res
 
     
 
 
+#### OTHER ####
+
+def explicit_lorentz(x, c):
+    x0 = torch.sum(x * x, dim=-1, keepdim=True)
+    x0 = torch.sqrt(x0 + 1/c)
+    return torch.cat([x0, x], dim=-1)

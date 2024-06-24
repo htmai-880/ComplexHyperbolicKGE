@@ -86,6 +86,18 @@ class MessagePassing(nn.Module):
         deg_inv[deg_inv	== float('inf')] = 0
         norm		= deg_inv[row] * edge_weight
         return norm
+
+    def compute_symmetric_norm(self, edge_index, num_ent, drop=False):
+        row, col	= edge_index
+        edge_weight 	= torch.ones_like(row).float()
+        if drop:
+            edge_weight = self.drop(edge_weight)
+        deg		= scatter_add(edge_weight, row, dim=0, dim_size=num_ent)	# Summing number of weights of the edges
+        deg_inv		= deg.pow(-0.5)
+        deg_inv[deg_inv	== float('inf')] = 0
+        norm		= deg_inv[row] * edge_weight * deg_inv[col]
+        return norm
+
     
     def __repr__(self):
         return '{}({}, {})'.format(
