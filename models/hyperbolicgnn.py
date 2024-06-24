@@ -14,7 +14,7 @@ from .mlp import MLP
 
 
 
-GNN_MODELS = ["PoincareGCN", "LorentzGCN", "PoincareGAT"]
+HYP_GNN_MODELS = ["PoincareGCN", "LorentzGCN", "PoincareGAT"]
 
 
 class PoincareConv(MessagePassing):

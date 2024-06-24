@@ -60,9 +60,6 @@ parser.add_argument(
     "--rank", default=1000, type=int, help="Embedding dimension"
 )
 parser.add_argument(
-    "--hidden_dim", default=1000, type=int, help="Hidden dimension for GNNs"
-)
-parser.add_argument(
     "--batch_size", default=1000, type=int, help="Batch size"
 )
 parser.add_argument(
@@ -76,12 +73,6 @@ parser.add_argument(
 )
 parser.add_argument(
     "--dropout", default=0, type=float, help="Dropout rate"
-)
-parser.add_argument(
-    "--edge_dropout", default=0.3, type=float, help="Dropout rate on edges for GNNs"
-)
-parser.add_argument(
-    "--layers", default=2, type=int, help="Number of layers"
 )
 parser.add_argument(
     "--init_size", default=1e-3, type=float, help="Initial embeddings' scale"
@@ -111,6 +102,26 @@ parser.add_argument(
 )
 parser.add_argument(
     "--save_dir", default='.', help="Where to save the log and model"
+)
+# Arguments specific to GNNs
+parser.add_argument(
+    "--hidden_dim", default=200, type=int, help="Hidden dimension for GNNs"
+)
+parser.add_argument(
+    "--edge_dropout", default=0.3, type=float, help="Dropout rate on edges for GNNs"
+)
+parser.add_argument(
+    "--layers", default=2, type=int, help="Number of layers"
+)
+## For CompGCN
+parser.add_argument(
+    "--opn", default="mult", type=str, help="Operation to use in the layers"
+)
+parser.add_argument(
+    "--interaction", default="distmult", type=str, help="Interaction model in CompGCN or other encoders"
+)
+parser.add_argument(
+    "--basis", default=0, type=int, help="Number of basis vectors in CompGCN"
 )
 
 
