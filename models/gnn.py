@@ -6,6 +6,7 @@ from torch_scatter import scatter, scatter_add
 from torch.nn.init import xavier_normal_, xavier_uniform_, kaiming_uniform_
 from models.base import KGModel
 from models.messagepassing import MessagePassing, scatter_, BaseGNN
+from models.gnnbase import GNN
 from utils.euclidean import givens_rotations, givens_reflection, multi_bmm, givens_unitary, multi_index_select, norm_clamp
 from utils.hyperbolic import mobius_add, expmap0, project, hyp_distance_multi_c, hyp_distance, logmap0, tanh
 from utils.hyperbolic import lorentz_boost, expmap0_lorentz, hyp_distance_multi_c_lorentz, logmap0_lorentz, explicit_lorentz
@@ -408,10 +409,9 @@ class PoincareBase(BaseGNN):
         self.act_r_base = kwargs.get("act_r")
         self.act_r = (lambda x : (self.act_r_base(x[0]), x[1]))
 
-class PoincareGCN(KGModel):
+class PoincareGCN(GNN):
     def __init__(self, args, dataset):
-        super(PoincareGCN, self).__init__(args.sizes, args.rank, args.dropout, args.gamma, args.dtype, args.bias,
-                                    args.init_size)
+        super(PoincareGCN, self).__init__(args, dataset)
     
         del self.rel
         self.rel = nn.Embedding(self.sizes[1], 2 * self.rank)
@@ -424,21 +424,13 @@ class PoincareGCN(KGModel):
             nn.init.normal_(self.rel.weight, 0, self.init_size)
             nn.init.uniform_(self.rel_diag.weight, -1.0, 1.0)
 
-        # Fetch the triples from the dataset
-        train_examples = dataset.get_examples("train")
-        self.edge_index = train_examples[:, [0, 2]].t().contiguous()
-        self.edge_type = train_examples[:, 1].contiguous()
-        # Two layers
-        hidden_dim = args.hidden_dim if args.hidden_dim else self.rank
-        self.hidden_dim = hidden_dim
-
         self.base = PoincareBase(
             in_channels=self.rank,
-            hidden_channels=hidden_dim,
-            out_channels=hidden_dim,
+            hidden_channels=self.hidden_dim,
+            out_channels=self.hidden_dim,
             in_channels_r=3*self.rank,
-            hidden_channels_r=3*hidden_dim,
-            out_channels_r=3*hidden_dim,
+            hidden_channels_r=3*self.hidden_dim,
+            out_channels_r=3*self.hidden_dim,
             layers=2,
             act=tanh,
             act_r=tanh,
@@ -447,73 +439,25 @@ class PoincareGCN(KGModel):
             dtype=args.dtype
         )
 
-        self.edge_dropout = nn.Dropout(args.edge_dropout)
-        self.dropout_p = args.dropout
-
     def __setattr__(self, name, value):
         if not "edge_" in name:
             super().__setattr__(name, value)
         else:
             nn.Module.__setattr__(self, name, value)
+
+    def get_r(self):
+        r = torch.cat((self.rel.weight, self.rel_diag.weight), dim=-1)
+        c = self.c_layer.weight # (N_r, 1)
+        return (r, c)
     
     def forward_base(self):
-        # x = tanh(self.entity.weight) # Typically, embeddings from language models will be reduced with an activation.
-        x = self.entity.weight
-        r = torch.cat((self.rel.weight, self.rel_diag.weight), dim=-1)
-        if self.multi_c:
-            c = self.c_layer.weight # (N_r, 1)
-
-        # Dropout on edges
-        num_edges = self.edge_index.size(1) // 2
-        idx = torch.ones(num_edges)
-        idx = self.edge_dropout(idx).bool()
-        idx = idx.repeat(2)
-
-        edge_index = self.edge_index[:, idx].to(x.device)
-        edge_type = self.edge_type[idx].to(x.device)
-        del idx
-
-        x, (r, c) = self.base(x, edge_index, edge_type, (r, c))
-
-        del edge_index
-        del edge_type
+        # Use the forward_base from the super class
+        x, (r, c) = super().forward_base()
 
         c = F.softplus(c)
         if not self.multi_c:
             c = c.mean(dim=0, keepdim=True)
-        return (x, r, c)
-    
-
-    def forward(self, queries, tails=None):
-        """KGModel forward pass.
-
-        Args:
-            queries: torch.LongTensor with query triples (head, relation)
-            tails: torch.LongTensor with tails
-        Returns:
-            predictions: torch.Tensor with triples' scores
-                         shape is (n_queries x 1) if eval_mode is false
-                         else (n_queries x n_entities)
-            factors: embeddings to regularize
-        """
-        while queries.dim() < 3:
-            queries = queries.unsqueeze(1)
-        if tails is not None:
-            while tails.dim() < 2:
-                tails = tails.unsqueeze(0)
-        cache = self.forward_base()
-        # get embeddings and similarity scores
-        lhs_e, lhs_biases = self.get_queries(queries, cache=cache)
-        # queries = F.dropout(queries, self.dropout, training=self.training)
-        rhs_e, rhs_biases = self.get_rhs(tails, cache=cache)
-        # candidates = F.dropout(candidates, self.dropout, training=self.training)
-        # if tails is None: # Eval mode
-        #     del cache[0], cache[1]
-        predictions = self.score((lhs_e, lhs_biases), (rhs_e, rhs_biases))
-
-        # get factors for regularization
-        factors = self.get_factors(queries, tails)
-        return predictions, factors
+        return x, (r, c)
     
     def get_queries(self, queries, cache=None):
         if cache is None:
@@ -549,25 +493,6 @@ class PoincareGCN(KGModel):
         while lhs_biases.dim() < 3:
             lhs_biases = lhs_biases.unsqueeze(1)
         return (res2, c), lhs_biases
-    
-    def get_rhs(self, tails=None, cache=None):
-        if cache is None:
-            x, r, curvatures = self.forward_base()
-        else:
-            x, r, curvatures = cache
-        if tails is None:
-            rhs_e, rhs_biases = x, self.bt.weight
-            while rhs_e.dim() < 3:
-                rhs_e = rhs_e.unsqueeze(0)
-            while rhs_biases.dim() < 3:
-                rhs_biases = rhs_biases.unsqueeze(0)
-        else:
-            rhs_e, rhs_biases = multi_index_select(x, tails), self.bt(tails)
-            while rhs_e.dim() < 3:
-                rhs_e = rhs_e.unsqueeze(1)
-            while rhs_biases.dim() < 3:
-                rhs_biases = rhs_biases.unsqueeze(1)
-        return rhs_e, rhs_biases
 
     def similarity_score(self, lhs_e, rhs_e):
         """Compute similarity scores or queries against targets in embedding space."""
