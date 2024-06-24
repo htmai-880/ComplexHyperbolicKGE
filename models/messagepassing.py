@@ -35,7 +35,8 @@ def scatter_(name, src, index, dim_size=None):
 	return out[0] if isinstance(out, tuple) else out
 
 class MessagePassing(nn.Module):
-    def __init__(self, in_channels, out_channels, in_channels_r, out_channels_r, act=None, dropout=0.3, dtype=None):
+    def __init__(self, in_channels, out_channels, in_channels_r, out_channels_r, act=None, dropout=0.0, dtype=None,
+                 **kwargs):
         super(MessagePassing, self).__init__()
         if dtype is None:
             self.data_type = torch.float
@@ -97,8 +98,102 @@ class MessagePassing(nn.Module):
         deg_inv[deg_inv	== float('inf')] = 0
         norm		= deg_inv[row] * edge_weight * deg_inv[col]
         return norm
-
     
     def __repr__(self):
         return '{}({}, {})'.format(
             self.__class__.__name__, self.in_channels, self.out_channels)
+    
+
+class BaseGNN(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels,
+                 in_channels_r, hidden_channels_r, out_channels_r,
+                 layers : int,
+                 act, act_r,
+                 mp,
+                 dropout=0.0,
+                 dtype=None,
+                 kwargs_first_layer=None,
+                 kwargs_hidden_layer=None,
+                 kwargs_last_layer=None
+                 ):
+        super(BaseGNN, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.in_channels_r = in_channels_r
+        self.out_channels_r = out_channels_r
+        self.hidden_channels = hidden_channels
+        self.hidden_channels_r = hidden_channels_r
+        self.act = act
+        self.act_r = act_r
+        self.layers = nn.ModuleList()
+        self.mp_class = mp
+        self.n_layers = layers
+        self.dropout = dropout
+        self.dtype = dtype
+        self.kwargs_first_layer = kwargs_first_layer
+        self.kwargs_hidden_layer = kwargs_hidden_layer
+        self.kwargs_last_layer = kwargs_last_layer
+
+        if self.n_layers == 1:
+            self.layers.append(self.make_first_layer())
+        else:
+            self.layers.append(self.make_first_layer())
+            for _ in range(self.n_layers - 2):
+                self.layers.append(self.make_hidden_layer())
+            self.layers.append(self.make_last_layer())
+    
+    def make_first_layer(self):
+        if self.n_layers == 1:
+            return self.mp_class(
+                in_channels = self.in_channels,
+                out_channels = self.out_channels,
+                in_channels_r = self.in_channels_r,
+                out_channels_r = self.out_channels_r,
+                act = None,
+                dropout = 0.0,
+                dtype = self.dtype,
+                **self.kwargs_first_layer
+            )
+        else:
+            return self.mp_class(
+                in_channels = self.in_channels,
+                out_channels = self.hidden_channels,
+                in_channels_r = self.in_channels_r,
+                out_channels_r = self.hidden_channels_r,
+                act = self.act,
+                dropout = self.dropout,
+                dtype = self.dtype,
+                **self.kwargs_first_layer
+            )
+    
+    def make_hidden_layer(self):
+        return self.mp_class(
+            in_channels = self.hidden_channels,
+            out_channels = self.hidden_channels,
+            in_channels_r = self.hidden_channels_r,
+            out_channels_r = self.hidden_channels_r,
+            act = self.act,
+            dropout = self.dropout,
+            dtype = self.dtype,
+            **self.kwargs_hidden_layer
+        )
+    
+    def make_last_layer(self):
+        return self.mp_class(
+            in_channels = self.hidden_channels,
+            out_channels = self.out_channels,
+            in_channels_r = self.hidden_channels_r,
+            out_channels_r = self.out_channels_r,
+            act = None,
+            dropout = 0.0,
+            dtype = self.dtype,
+            **self.kwargs_last_layer
+        )
+
+    def forward(self, x, edge_index, edge_type, rel_embed):
+        for i, layer in enumerate(self.layers):
+            x, rel_embed = layer(x, edge_index, edge_type, rel_embed)
+            if i != len(self.layers) - 1:
+                rel_embed = self.act_r(rel_embed)
+        return x, rel_embed
+    

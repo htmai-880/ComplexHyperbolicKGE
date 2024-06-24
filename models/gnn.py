@@ -5,7 +5,7 @@ from torch import nn
 from torch_scatter import scatter, scatter_add
 from torch.nn.init import xavier_normal_, xavier_uniform_, kaiming_uniform_
 from models.base import KGModel
-from models.messagepassing import MessagePassing, scatter_
+from models.messagepassing import MessagePassing, scatter_, BaseGNN
 from utils.euclidean import givens_rotations, givens_reflection, multi_bmm, givens_unitary, multi_index_select, norm_clamp
 from utils.hyperbolic import mobius_add, expmap0, project, hyp_distance_multi_c, hyp_distance, logmap0, tanh
 from utils.hyperbolic import lorentz_boost, expmap0_lorentz, hyp_distance_multi_c_lorentz, logmap0_lorentz, explicit_lorentz
@@ -80,8 +80,6 @@ class PoincareConv(MessagePassing):
 
         out_rel = torch.cat([rel1, rel2, rot], dim=-1)
 
-
-
         # out_scale = tanh(self.w_scale(trans_rot_r))
         # out_scale = out_scale + torch.ones_like(out_scale)
         # out_rel = torch.cat([out_rel, out_scale], dim=-1)
@@ -98,7 +96,7 @@ class PoincareConv(MessagePassing):
 
         # out_rel = tanh(out_rel)
         
-        return out, out_rel, curvatures_out
+        return out, (out_rel, curvatures_out)
 
     def propagate(self, edge_index, x, edge_type, rel_embed, curvatures=None):
         num_edges = edge_index.size(1) // 2
@@ -171,13 +169,21 @@ class PoincareConv(MessagePassing):
 
             # out = (1 - loop_weight) * out + loop_weight * out_loop
 
-            out = expmap0((1 - loop_weight) * out, loop_curvature)
-            out_loop = expmap0(loop_weight * out_loop, loop_curvature)
+            # Compute degrees
+            degs = torch.ones_like(edge_norm)
+            degs = scatter_("add", degs, edge_index[0], dim_size=x.size(0)).squeeze(1) # (N,)
+            out_ = torch.zeros(out.size(0), out.size(1), dtype=out.dtype).to(self.device)
+            out_[degs == 0] = out_loop[degs == 0]
+
+            out = expmap0((1 - loop_weight) * out[degs > 0], loop_curvature)
+            out_loop = expmap0(loop_weight * out_loop[degs > 0], loop_curvature)
             out = project(
                 mobius_add(out, out_loop, loop_curvature),
                 loop_curvature
             )
             out = logmap0(out, loop_curvature)
+            out_[degs > 0] = out
+            out = out_
 
         # Output of size [N, D] and lives in the tangent plane
         # METHOD 2: Aggregation in the hyperbolic space using gyromidpoint.
@@ -395,6 +401,12 @@ class PoincareGATConv(PoincareConv):
         a_ij = a_ij / (sum_[head_entities] + 1e-8)
         del head_entities
         return a_ij, h_j_tail # (E+N, K, 1) and # (E+N, K, D)
+    
+class PoincareBase(BaseGNN):
+    def __init__(self, **kwargs):
+        super(PoincareBase, self).__init__(**kwargs)
+        self.act_r_base = kwargs.get("act_r")
+        self.act_r = (lambda x : (self.act_r_base(x[0]), x[1]))
 
 class PoincareGCN(KGModel):
     def __init__(self, args, dataset):
@@ -419,31 +431,22 @@ class PoincareGCN(KGModel):
         # Two layers
         hidden_dim = args.hidden_dim if args.hidden_dim else self.rank
         self.hidden_dim = hidden_dim
-        channels_r = 4 * args.rank
-        hidden_channels_r = 4 * hidden_dim
-        self.layers = nn.ModuleList([PoincareConv(
-            in_channels=self.rank, out_channels=hidden_dim,
-            in_channels_r = channels_r, out_channels_r = hidden_channels_r,
-            act = tanh,
-            dropout = args.dropout,
-            dtype=args.dtype
-        )])
-        for _ in range(args.layers-2):
-            self.layers.append(PoincareConv(
-                in_channels=hidden_dim, out_channels=hidden_dim,
-                in_channels_r = hidden_channels_r, out_channels_r = hidden_channels_r,
-                act = tanh,
-                dropout = args.dropout,
-                dtype=args.dtype
-            ))
 
-        self.layers.append(PoincareConv(
-            in_channels= hidden_dim, out_channels = hidden_dim,
-            in_channels_r = hidden_channels_r, out_channels_r = hidden_channels_r,
-            act = None,
-            dropout = 0,
+        self.base = PoincareBase(
+            in_channels=self.rank,
+            hidden_channels=hidden_dim,
+            out_channels=hidden_dim,
+            in_channels_r=3*self.rank,
+            hidden_channels_r=3*hidden_dim,
+            out_channels_r=3*hidden_dim,
+            layers=2,
+            act=tanh,
+            act_r=tanh,
+            mp=PoincareConv,
+            dropout=args.dropout,
             dtype=args.dtype
-        ))
+        )
+
         self.edge_dropout = nn.Dropout(args.edge_dropout)
         self.dropout_p = args.dropout
 
@@ -470,11 +473,8 @@ class PoincareGCN(KGModel):
         edge_type = self.edge_type[idx].to(x.device)
         del idx
 
-        for i, conv in enumerate(self.layers):
-            x, r, c = conv.forward(x, edge_index, edge_type, (r, c))
-            if i < len(self.layers) - 1:
-                # Activation on r, which is not in the layer code
-                r = tanh(r)
+        x, (r, c) = self.base(x, edge_index, edge_type, (r, c))
+
         del edge_index
         del edge_type
 
