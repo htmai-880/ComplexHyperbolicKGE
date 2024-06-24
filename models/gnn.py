@@ -461,9 +461,9 @@ class PoincareGCN(GNN):
     
     def get_queries(self, queries, cache=None):
         if cache is None:
-            x, r, curvatures = self.forward_base()
+            x, (r, curvatures) = self.forward_base()
         else:
-            x, r, curvatures = cache
+            x, (r, curvatures) = cache
         r = multi_index_select(r, queries[..., 1])
         rel1, rel2, rot = torch.chunk(r, 3, dim=-1)
         # rel1, rel2, rot, scale = torch.chunk(r, 4, dim=-1)
@@ -871,9 +871,9 @@ class LorentzGCN(KGModel):
     
     def get_queries(self, queries, cache=None):
         if cache is None:
-            x, r, curvatures = self.forward_base()
+            x, (r, curvatures) = self.forward_base()
         else:
-            x, r, curvatures = cache
+            x, (r, curvatures) = cache
         r = multi_index_select(r, queries[..., 1])
         rel1, rel2, rot = torch.chunk(r, 3, dim=-1)
         # rel1, rel2, rot, scale = torch.chunk(r, 4, dim=-1)
@@ -905,9 +905,9 @@ class LorentzGCN(KGModel):
     
     def get_rhs(self, tails=None, cache=None):
         if cache is None:
-            x, r, curvatures = self.forward_base()
+            x, (r, curvatures) = self.forward_base()
         else:
-            x, r, curvatures = cache
+            x, (r, curvatures) = cache
         if tails is None:
             rhs_e, rhs_biases = x, self.bt.weight
             while rhs_e.dim() < 3:
