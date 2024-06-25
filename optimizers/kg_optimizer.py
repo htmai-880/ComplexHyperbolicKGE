@@ -39,6 +39,8 @@ class KGOptimizer(object):
         # self.loss_fn = nn.BCELoss(reduction='mean')
         self.neg_sample_size = neg_sample_size
         self.n_entities = model.sizes[0]
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cpu")
 
     def reduce_lr(self, factor=0.8):
         """Reduce learning rate.
@@ -105,7 +107,27 @@ class KGOptimizer(object):
         loss = - torch.cat([positive_score.view(-1), negative_score.view(-1)]).mean()
         return loss, factors
 
-    def no_neg_sampling_loss(self, input_batch):
+    # def no_neg_sampling_loss(self, input_batch):
+    #     """Compute KG embedding loss without negative sampling.
+
+    #     Args:
+    #         input_batch: torch.LongTensor of shape (batch_size x 3) with ground truth training triples
+
+    #     Returns:
+    #         loss: torch.Tensor with embedding loss
+    #         factors: torch.Tensor with embeddings weights to regularize
+    #     """
+    #     predictions, factors = self.model(input_batch)
+    #     truth = input_batch[:, 2]
+    #     log_prob = F.logsigmoid(-predictions)
+    #     idx = torch.arange(0, truth.shape[0], dtype=truth.dtype)
+    #     pos_scores = F.logsigmoid(predictions[idx, truth]) - F.logsigmoid(-predictions[idx, truth])
+    #     log_prob[idx, truth] += pos_scores
+    #     loss = - log_prob.mean()
+    #     loss += self.regularizer.forward(factors)
+    #     return loss, factors
+
+    def no_neg_sampling_loss(self, input_batch, smoothing=None):
         """Compute KG embedding loss without negative sampling.
 
         Args:
@@ -137,10 +159,10 @@ class KGOptimizer(object):
         if self.neg_sample_size > 0:
             loss, factors = self.neg_sampling_loss(input_batch)
         else:
-            predictions, factors = self.model(input_batch)
-            truth = input_batch[:, 2]
-            loss = self.loss_fn(predictions, truth.unsqueeze(1))
-            # loss, factors = self.no_neg_sampling_loss(input_batch)
+            # predictions, factors = self.model(input_batch)
+            # truth = input_batch[:, 2]
+            # loss = self.loss_fn(predictions, truth.unsqueeze(1))
+            loss, factors = self.no_neg_sampling_loss(input_batch)
 
         # regularization loss
         loss += self.regularizer.forward(factors)
@@ -160,7 +182,7 @@ class KGOptimizer(object):
         counter = 0
         with torch.no_grad():
             while b_begin < examples.shape[0]:
-                input_batch = examples[b_begin:b_begin + self.batch_size].cuda()
+                input_batch = examples[b_begin:b_begin + self.batch_size].to(self.device)
                 b_begin += self.batch_size
                 loss += self.calculate_loss(input_batch)
                 counter += 1
@@ -183,7 +205,7 @@ class KGOptimizer(object):
             total_loss = 0.0
             counter = 0
             while b_begin < examples.shape[0]:
-                input_batch = actual_examples[b_begin:b_begin + self.batch_size].cuda()
+                input_batch = actual_examples[b_begin:b_begin + self.batch_size].to(self.device)
 
                 # gradient step
                 l = self.calculate_loss(input_batch)

@@ -111,6 +111,7 @@ class BaseGNN(nn.Module):
                  act, act_r,
                  mp,
                  dropout=0.0,
+                 drop_in_between=False,
                  dtype=None,
                  kwargs_first_layer=None,
                  kwargs_hidden_layer=None,
@@ -128,7 +129,10 @@ class BaseGNN(nn.Module):
         self.layers = nn.ModuleList()
         self.mp_class = mp
         self.n_layers = layers
+
         self.dropout = dropout
+        self.drop_in_between=drop_in_between
+        self.drop = nn.Dropout(dropout)
         self.dtype = dtype
         self.kwargs_first_layer = kwargs_first_layer if isinstance(kwargs_first_layer, dict) else {}
         self.kwargs_hidden_layer = kwargs_hidden_layer  if isinstance(kwargs_hidden_layer, dict) else {}
@@ -194,6 +198,8 @@ class BaseGNN(nn.Module):
         for i, layer in enumerate(self.layers):
             x, rel_embed = layer(x, edge_index, edge_type, rel_embed)
             if i != len(self.layers) - 1:
+                if self.drop_in_between:
+                    x = self.drop(x)
                 rel_embed = self.act_r(rel_embed)
         return x, rel_embed
     

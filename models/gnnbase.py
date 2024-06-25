@@ -74,8 +74,6 @@ class GNN(KGModel):
         # queries = F.dropout(queries, self.dropout, training=self.training)
         rhs_e, rhs_biases = self.get_rhs(tails, cache=cache)
         # candidates = F.dropout(candidates, self.dropout, training=self.training)
-        # if tails is None: # Eval mode
-        #     del cache[0], cache[1]
         predictions = self.score((lhs_e, lhs_biases), (rhs_e, rhs_biases))
 
         # get factors for regularization

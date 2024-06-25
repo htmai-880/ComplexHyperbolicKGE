@@ -24,7 +24,13 @@ class CompGCNConv(MessagePassing):
         self.w_out = nn.Parameter(torch.randn(self.in_channels, self.out_channels, dtype=self.data_type))
         self.w_rel = nn.Linear(self.in_channels, self.out_channels, bias=False, dtype=self.data_type)
         self.loop_rel = nn.Parameter(torch.randn(1, self.in_channels, dtype=self.data_type))
-        self.bn	= torch.nn.BatchNorm1d(self.out_channels)
+        self.bn	= nn.BatchNorm1d(self.out_channels)
+
+        with torch.no_grad():
+            xavier_uniform_(self.w_loop)
+            xavier_uniform_(self.w_in)
+            xavier_uniform_(self.w_out)
+            xavier_uniform_(self.w_rel.weight)
 
     def forward(self, x, edge_index, edge_type, rel_embed):
         out = self.propagate(edge_index, x=x, edge_type=edge_type, rel_embed=rel_embed)
@@ -32,7 +38,7 @@ class CompGCNConv(MessagePassing):
         if not self.act is None:
             out = self.act(out)
         out_rel = self.w_rel(rel_embed)
-        return x, out_rel
+        return out, out_rel
     
     def propagate(self, edge_index, x, edge_type, rel_embed):
         num_edges = edge_index.size(1) // 2
@@ -99,21 +105,19 @@ class CompGCNBase(BaseGNN):
         super(CompGCNBase, self).__init__(**kwargs)
         for l in self.layers:
             l.opn = opn
+        self.drop_in_between=True
 
 class CompGCN(GNN):
     def __init__(self, args, dataset):
-        super(CompGCN, self).__init__(args.sizes, args.rank, args.dropout, args.gamma, args.dtype, args.bias,
-                                    args.init_size)
+        super(CompGCN, self).__init__(args, dataset)
         self.B = args.basis if args.basis else 0
 
         if self.B > 0:
             del self.rel
             # Basis vectors
-            self.rel = nn.Embedding(self.B, self.rank)
+            self.rel_diag = nn.Embedding(self.B, self.rank)
             # Coefficients
-            self.rel_diag = nn.Embedding(self.sizes[1], self.B)
-        else:
-            del self.rel_diag
+            self.rel = nn.Embedding(self.sizes[1], self.B)
 
         self.base = CompGCNBase(
             opn=args.opn if args.opn else "mult",
@@ -123,7 +127,7 @@ class CompGCN(GNN):
             in_channels_r=self.rank,
             hidden_channels_r=self.hidden_dim,
             out_channels_r=self.hidden_dim,
-            layers=2,
+            layers=args.layers,
             act=tanh,
             act_r=nn.Identity(),
             mp=CompGCNConv,
@@ -135,7 +139,7 @@ class CompGCN(GNN):
     
     def get_r(self):
         if self.B > 0:
-            return self.rel_diag.weight @ self.rel.weight
+            return self.rel.weight @ self.rel_diag.weight
         else:
             return self.rel.weight
     
@@ -148,15 +152,25 @@ class CompGCN(GNN):
         head = multi_index_select(x, queries[..., 0])
         rel = multi_index_select(r, queries[..., 1])
         if self.interaction == 'distmult':
-            return head * rel
+            lhs_e = head * rel
         elif self.interaction == 'transe':
-            return head + rel
+            lhs_e = head + rel
+
+        lhs_biases = self.bh(queries[..., 0])
+        while lhs_e.dim() < 3:
+            lhs_e = lhs_e.unsqueeze(1)
+        while lhs_biases.dim() < 3:
+            lhs_biases = lhs_biases.unsqueeze(1)
+        return lhs_e, lhs_biases
     
     def similarity_score(self, lhs_e, rhs_e):
+        # print(lhs_e.shape, rhs_e.shape)
         if self.interaction == 'distmult':
-            return (lhs_e * rhs_e).sum(dim=-1, keepdim=True)
+            scores = (lhs_e * rhs_e).sum(dim=-1, keepdim=True)
         elif self.interaction == 'transe':
-            return - euc_sqdistance(lhs_e, rhs_e)
+            scores = - euc_sqdistance(lhs_e, rhs_e)
+        # print(scores.shape)
+        return scores
     
 
 
