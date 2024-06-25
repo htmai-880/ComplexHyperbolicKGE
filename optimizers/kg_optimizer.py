@@ -22,7 +22,7 @@ class KGOptimizer(object):
     """
 
     def __init__(
-            self, model, regularizer, optimizer, batch_size, update_steps, neg_sample_size, double_neg, optimizer2=None, verbose=True):
+            self, model, regularizer, optimizer, batch_size, update_steps, neg_sample_size, double_neg, optimizer2=None, dataset=None, verbose=True):
         """Inits KGOptimizer."""
         self.model = model
         self.regularizer = regularizer
@@ -36,11 +36,14 @@ class KGOptimizer(object):
         self.verbose = verbose
         self.double_neg = double_neg
         self.loss_fn = nn.CrossEntropyLoss(reduction='mean')
-        # self.loss_fn = nn.BCELoss(reduction='mean')
+        self.bce = nn.BCELoss(reduction='mean')
         self.neg_sample_size = neg_sample_size
         self.n_entities = model.sizes[0]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.device = torch.device("cpu")
+
+        self.dataset = dataset
+        
 
     def reduce_lr(self, factor=0.8):
         """Reduce learning rate.
@@ -97,6 +100,9 @@ class KGOptimizer(object):
             factors: torch.Tensor with embeddings weights to regularize
         """
         # positive samples
+        if isinstance(input_batch, tuple):
+            input_batch, labels = input_batch
+
         positive_score, factors = self.model(input_batch[:, :2].unsqueeze(1), input_batch[:, 2].unsqueeze(1))
         positive_score = F.logsigmoid(positive_score)
 
@@ -137,14 +143,22 @@ class KGOptimizer(object):
             loss: torch.Tensor with embedding loss
             factors: torch.Tensor with embeddings weights to regularize
         """
-        predictions, factors = self.model(input_batch)
-        truth = input_batch[:, 2]
-        log_prob = F.logsigmoid(-predictions)
-        idx = torch.arange(0, truth.shape[0], dtype=truth.dtype)
-        pos_scores = F.logsigmoid(predictions[idx, truth]) - F.logsigmoid(-predictions[idx, truth])
-        log_prob[idx, truth] += pos_scores
-        loss = - log_prob.mean()
-        loss += self.regularizer.forward(factors)
+        if not self.dataset is None:
+            input_batch, labels = input_batch
+            # If smoothing is not None, we use label smoothing
+            if not smoothing is None:
+                labels = (1.0 - smoothing) * labels + smoothing / self.n_entities
+            predictions, factors = self.model(input_batch)
+            loss = self.bce(predictions.sigmoid(), labels)
+        else:
+            predictions, factors = self.model(input_batch)
+            truth = input_batch[:, 2]
+            log_prob = F.logsigmoid(-predictions)
+            idx = torch.arange(0, truth.shape[0], dtype=truth.dtype)
+            pos_scores = F.logsigmoid(predictions[idx, truth]) - F.logsigmoid(-predictions[idx, truth])
+            log_prob[idx, truth] += pos_scores
+            loss = - log_prob.mean()
+            loss += self.regularizer.forward(factors)
         return loss, factors
 
     def calculate_loss(self, input_batch):
@@ -177,16 +191,30 @@ class KGOptimizer(object):
         Returns:
             loss: torch.Tensor with loss averaged over all validation examples
         """
-        b_begin = 0
-        loss = 0.0
-        counter = 0
-        with torch.no_grad():
-            while b_begin < examples.shape[0]:
-                input_batch = examples[b_begin:b_begin + self.batch_size].to(self.device)
-                b_begin += self.batch_size
-                loss += self.calculate_loss(input_batch)
-                counter += 1
-        loss /= counter
+        if self.dataset is None:
+            b_begin = 0
+            loss = 0.0
+            counter = 0
+            with torch.no_grad():
+                while b_begin < examples.shape[0]:
+                    input_batch = examples[b_begin:b_begin + self.batch_size].to(self.device)
+                    b_begin += self.batch_size
+                    loss += self.calculate_loss(input_batch)
+                    counter += 1
+            loss /= counter
+        else:
+            # ignore examples
+            loss = 0.0
+            counter = 0
+            with torch.no_grad():
+                for batch in self.dataset.valid_loader:
+                    input_batch, labels = batch
+                    input_batch = input_batch.to(self.device)
+                    labels = labels.to(self.device)
+                    input_batch = (input_batch, labels)
+
+                    loss += self.calculate_loss(input_batch)
+                    counter += 1
         return loss
 
     def epoch(self, examples):
@@ -198,34 +226,66 @@ class KGOptimizer(object):
         Returns:
             loss: torch.Tensor with loss averaged over all training examples
         """
-        actual_examples = examples[torch.randperm(examples.shape[0]), :]
-        with tqdm.tqdm(total=examples.shape[0], unit='ex', disable=not self.verbose) as bar:
-            bar.set_description(f'train loss')
-            b_begin = 0
-            total_loss = 0.0
-            counter = 0
-            while b_begin < examples.shape[0]:
-                input_batch = actual_examples[b_begin:b_begin + self.batch_size].to(self.device)
+        if self.dataset is None:
+            actual_examples = examples[torch.randperm(examples.shape[0]), :]
+            with tqdm.tqdm(total=examples.shape[0], unit='ex', disable=not self.verbose) as bar:
+                bar.set_description(f'train loss')
+                b_begin = 0
+                total_loss = 0.0
+                counter = 0
+                while b_begin < examples.shape[0]:
+                    input_batch = actual_examples[b_begin:b_begin + self.batch_size].to(self.device)
 
-                # gradient step
-                l = self.calculate_loss(input_batch)
-                l.backward()
+                    # gradient step
+                    l = self.calculate_loss(input_batch)
+                    l.backward()
 
-                if self.update_steps == 1 or \
-                    (counter + 1) % self.update_steps == 0 or \
-                        b_begin + self.batch_size >= examples.shape[0]:
-                    self.optimizer.step()
-                    if self.optimizer2 is not None:
-                        self.optimizer2.step()
-                    self.optimizer.zero_grad()
-                    if self.optimizer2 is not None:
-                        self.optimizer2.zero_grad()
+                    if self.update_steps == 1 or \
+                        (counter + 1) % self.update_steps == 0 or \
+                            b_begin + self.batch_size >= examples.shape[0]:
+                        self.optimizer.step()
+                        if self.optimizer2 is not None:
+                            self.optimizer2.step()
+                        self.optimizer.zero_grad()
+                        if self.optimizer2 is not None:
+                            self.optimizer2.zero_grad()
 
-                b_begin += self.batch_size
-                total_loss += l.item()
-                counter += 1
-                bar.update(input_batch.shape[0])
-                bar.set_postfix(loss=f'{l.item():.4f}')
-        total_loss /= counter
+                    b_begin += self.batch_size
+                    total_loss += l.item()
+                    counter += 1
+                    bar.update(input_batch.shape[0])
+                    bar.set_postfix(loss=f'{l.item():.4f}')
+            total_loss /= counter
+        else:
+            train_loader = self.dataset.train_loader
+            with tqdm.tqdm(total=len(train_loader), unit='batch', disable=not self.verbose) as bar:
+                bar.set_description(f'train loss')
+                total_loss = 0.0
+                counter = 0
+                for batch in train_loader:
+                    input_batch, labels = batch
+                    input_batch = input_batch.to(self.device)
+                    labels = labels.to(self.device).to_dense().unsqueeze(-1)
+                    input_batch = (input_batch, labels)
+
+                    # gradient step
+                    l = self.calculate_loss(input_batch)
+                    l.backward()
+
+                    if self.update_steps == 1 or \
+                        (counter + 1 ) % self.update_steps == 0 or \
+                            counter + 1 == len(train_loader):
+                        self.optimizer.step()
+                        if self.optimizer2 is not None:
+                            self.optimizer2.step()
+                        self.optimizer.zero_grad()
+                        if self.optimizer2 is not None:
+                            self.optimizer2.zero_grad()
+
+                    total_loss += l.item()
+                    counter += 1
+                    bar.update(1)
+                    bar.set_postfix(loss=f'{l.item():.4f}')
+            total_loss /= counter
         return total_loss
 

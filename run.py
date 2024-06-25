@@ -13,7 +13,7 @@ import torch.optim
 import models
 import optimizers.regularizers as regularizers
 
-from datasets.kg_dataset import KGDataset
+from datasets.kg_dataset import KGDataset, KGDataset2
 from models import all_models
 from optimizers.kg_optimizer import KGOptimizer
 from utils.train import get_savedir, avg_both, format_metrics, count_params
@@ -149,7 +149,8 @@ def train(args):
 
     # create dataset
     dataset_path = os.path.join(DATA_PATH, args.dataset)
-    dataset = KGDataset(dataset_path, args.debug)
+    # dataset = KGDataset(dataset_path, args.debug)
+    dataset = KGDataset2(dataset_path, args.debug, args.batch_size, args.dtype)
     args.sizes = dataset.get_shape()
 
     # load data
@@ -173,7 +174,8 @@ def train(args):
         model = getattr(models, args.model)(args)
     total = count_params(model)
     logging.info("Total number of parameters {}".format(total))
-    model.cuda()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
     # print(model)
     # print("Model parameters: ", dict(model.named_parameters()))
     # print("Layer parameters: ", dict(model.layers[0].named_parameters()))
@@ -181,20 +183,20 @@ def train(args):
 
     model.eval()
 
-    # Validation metrics
-    valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
-    logging.info(format_metrics(valid_metrics, split="valid"))
+    # # Validation metrics
+    # valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
+    # logging.info(format_metrics(valid_metrics, split="valid"))
 
-    # Test metrics
-    test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
-    logging.info(format_metrics(test_metrics, split="test"))
+    # # Test metrics
+    # test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
+    # logging.info(format_metrics(test_metrics, split="test"))
 
     # get optimizer
     regularizer = getattr(regularizers, args.regularizer)(args.reg)
 
     optim_method = getattr(torch.optim, args.optimizer)(model.parameters(), lr=args.learning_rate)
     optimizer = KGOptimizer(model, regularizer, optim_method, args.batch_size, args.update_steps,
-                            args.neg_sample_size, bool(args.double_neg))
+                            args.neg_sample_size, bool(args.double_neg), dataset=dataset)
     counter = 0
     best_mrr = None
     best_epoch = None
@@ -222,7 +224,7 @@ def train(args):
                 best_epoch = step
                 logging.info("\t Saving model at epoch {} in {}".format(step, save_dir))
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
-                model.cuda()
+                model.to(device)
             else:
                 counter += 1
                 if counter == args.patience:
@@ -241,7 +243,7 @@ def train(args):
     else:
         logging.info("\t Loading best model saved at epoch {}".format(best_epoch))
         model.load_state_dict(torch.load(os.path.join(save_dir, "model.pt")))
-    model.cuda()
+    model.to(device)
     model.eval()
 
     # Validation metrics
