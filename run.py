@@ -101,6 +101,9 @@ parser.add_argument(
     "--multi_c", action="store_true", help="Multiple curvatures per relation"
 )
 parser.add_argument(
+    "--smoothing", type=float, help="Logloss smoothing."
+)
+parser.add_argument(
     "--save_dir", default='.', help="Where to save the log and model"
 )
 # Arguments specific to GNNs
@@ -196,7 +199,7 @@ def train(args):
 
     optim_method = getattr(torch.optim, args.optimizer)(model.parameters(), lr=args.learning_rate)
     optimizer = KGOptimizer(model, regularizer, optim_method, args.batch_size, args.update_steps,
-                            args.neg_sample_size, bool(args.double_neg), dataset=dataset)
+                            args.neg_sample_size, bool(args.double_neg), dataset=dataset, smoothing=args.smoothing)
     counter = 0
     best_mrr = None
     best_epoch = None

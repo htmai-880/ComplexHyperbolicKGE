@@ -22,7 +22,7 @@ class KGOptimizer(object):
     """
 
     def __init__(
-            self, model, regularizer, optimizer, batch_size, update_steps, neg_sample_size, double_neg, optimizer2=None, dataset=None, verbose=True):
+            self, model, regularizer, optimizer, batch_size, update_steps, neg_sample_size, double_neg, optimizer2=None, dataset=None, smoothing=None, verbose=True):
         """Inits KGOptimizer."""
         self.model = model
         self.regularizer = regularizer
@@ -41,7 +41,7 @@ class KGOptimizer(object):
         self.n_entities = model.sizes[0]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.device = torch.device("cpu")
-
+        self.smoothing = smoothing
         self.dataset = dataset
         
 
@@ -133,7 +133,7 @@ class KGOptimizer(object):
     #     loss += self.regularizer.forward(factors)
     #     return loss, factors
 
-    def no_neg_sampling_loss(self, input_batch, smoothing=None):
+    def no_neg_sampling_loss(self, input_batch):
         """Compute KG embedding loss without negative sampling.
 
         Args:
@@ -146,8 +146,8 @@ class KGOptimizer(object):
         if not self.dataset is None:
             input_batch, labels = input_batch
             # If smoothing is not None, we use label smoothing
-            if not smoothing is None:
-                labels = (1.0 - smoothing) * labels + smoothing / self.n_entities
+            if not self.smoothing is None:
+                labels = (1.0 - self.smoothing) * labels + self.smoothing / self.n_entities
             predictions, factors = self.model(input_batch)
             loss = self.bce(predictions.sigmoid(), labels)
         else:
