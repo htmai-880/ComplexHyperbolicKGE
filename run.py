@@ -160,7 +160,7 @@ def train(args):
     logging.info("\t " + str(dataset.get_shape()))
     train_examples = dataset.get_examples("train")
     valid_examples = dataset.get_examples("valid")
-    test_examples = dataset.get_examples("test")
+    test_examples = torch.LongTensor(dataset.get_examples("test"))
     test_relation_examples = []
     for i in range(0, 11):
         test_relation_examples.append(dataset.get_examples("test", rel_idx=i))
@@ -186,20 +186,20 @@ def train(args):
 
     model.eval()
 
-    # # Validation metrics
-    # valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
-    # logging.info(format_metrics(valid_metrics, split="valid"))
+    # Validation metrics
+    valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
+    logging.info(format_metrics(valid_metrics, split="valid"))
 
-    # # Test metrics
-    # test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
-    # logging.info(format_metrics(test_metrics, split="test"))
+    # Test metrics
+    test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
+    logging.info(format_metrics(test_metrics, split="test"))
 
     # get optimizer
     regularizer = getattr(regularizers, args.regularizer)(args.reg)
 
     optim_method = getattr(torch.optim, args.optimizer)(model.parameters(), lr=args.learning_rate)
     optimizer = KGOptimizer(model, regularizer, optim_method, args.batch_size, args.update_steps,
-                            args.neg_sample_size, bool(args.double_neg), dataset=dataset, smoothing=args.smoothing)
+                            args.neg_sample_size, bool(args.double_neg), smoothing=args.smoothing)
     counter = 0
     best_mrr = None
     best_epoch = None

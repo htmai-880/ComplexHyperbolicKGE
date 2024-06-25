@@ -2,7 +2,7 @@
 """Base Knowledge Graph embedding model."""
 from abc import ABC, abstractmethod
 from numpy import isin
-
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -292,6 +292,11 @@ class KGModel(nn.Module, ABC):
         hits_at = {}
 
         # rhs
+        if isinstance(examples, tuple):
+            examples = examples[0]
+        if isinstance(examples, np.ndarray):
+            examples = torch.from_numpy(examples)
+        
         q = examples
         ranks = self.get_ranking(q, filters["rhs"], batch_size=batch_size)
         mean_rank["rhs"] = torch.mean(ranks).item()

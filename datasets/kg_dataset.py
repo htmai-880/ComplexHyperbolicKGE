@@ -103,9 +103,6 @@ class TrainDataset(SparseDataset):
         # Make a specific train filter
         self.train_filter = self.make_filters()
         self.targets = self.make_labels()
-
-        super(TrainDataset, self).__init__(self.examples, self.targets, transform=False)
-
     
     def make_filters(self):
         # Train filter first
@@ -138,7 +135,7 @@ class TrainDataset(SparseDataset):
             for l in label:
                 row.append(i)
                 col.append(l)
-        labels = sp.csr_matrix(
+        labels = sp.csr_array(
             (np.ones(len(row)), (row, col)), shape=(len(row), self.n_entities)
         )
         return labels
@@ -195,11 +192,7 @@ class ValidDataset(SparseDataset):
     
         self.examples = self.get_examples()
         self.valid_filter = self.make_filters(train_dataset.train_filter)
-        self.targets = self.make_labels()
-        self.examples = torch.from_numpy(self.examples)
-
-        super(ValidDataset, self).__init__(self.examples, self.targets, transform=False)
-        
+        self.targets = self.make_labels()        
     
     def make_filters(self, train_filter):
         # deep copy of train filter
@@ -257,7 +250,7 @@ class ValidDataset(SparseDataset):
             for l in label:
                 row.append(i)
                 col.append(l)
-        labels = sp.csr_matrix(
+        labels = sp.csr_array(
             (np.ones(len(row)), (row, col)), shape=(len(row), self.n_entities)
         )
         return labels
@@ -283,8 +276,6 @@ class KGDataset2(object):
             
         self.train_dataset = TrainDataset(data_path, debug, dtype)
         self.valid_dataset = ValidDataset(self.train_dataset)
-        self.train_loader = self.make_loader("train", batch_size)
-        self.valid_loader = self.make_loader("valid", batch_size)
 
         filters_file = open(os.path.join(self.data_path, "to_skip.pickle"), "rb")
         self.to_skip = pkl.load(filters_file)
@@ -301,27 +292,6 @@ class KGDataset2(object):
         """Returns KG dataset shape."""
         return self.n_entities, self.n_predicates, self.n_entities
     
-    def make_loader(self, split="train", batch_size=1):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if split == "train":
-            sampler = BatchSampler(
-                RandomSampler(self.train_dataset, generator = torch.Generator(device=device)),
-                batch_size=batch_size,
-                drop_last=False,
-            )
-            return DataLoader(self.train_dataset, batch_size=1, collate_fn=sparse_batch_collate,
-                              generator=torch.Generator(device=device), sampler=sampler
-            )
-        elif split == "valid":
-            sampler = BatchSampler(
-                RandomSampler(self.valid_dataset, generator = torch.Generator(device=device)),
-                batch_size=batch_size,
-                drop_last=False,
-            )
-            return DataLoader(self.valid_dataset, batch_size=1, collate_fn=sparse_batch_collate,
-                              generator=torch.Generator(device=device), sampler=sampler
-            )
-    
     def get_examples(self, split, rel_idx=-1):
         """Get examples in a split.
 
@@ -333,13 +303,13 @@ class KGDataset2(object):
             examples: torch.LongTensor containing KG triples in a split
         """
         if split=="train":
-            examples = self.train_dataset.get_examples(rel_idx)
+            examples = self.train_dataset.examples, self.train_dataset.targets
         elif split=="valid":
-            examples = self.valid_dataset.get_examples(rel_idx)
+            examples = self.valid_dataset.examples, self.valid_dataset.targets
         else:
             examples = self.data[split]
             if rel_idx >= 0:
                 examples = examples[examples[:, 1] == rel_idx]
             if self.debug:
                 examples = examples[:1000]
-        return torch.from_numpy(examples.astype("int64"))
+        return examples
