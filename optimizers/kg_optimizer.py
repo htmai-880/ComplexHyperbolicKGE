@@ -149,6 +149,7 @@ class KGOptimizer(object):
             if not self.smoothing is None:
                 labels = (1.0 - self.smoothing) * labels.to(predictions.dtype) + self.smoothing / self.n_entities
             loss = self.bce(predictions.sigmoid(), labels)
+            loss += self.regularizer.forward(factors)
         else:
             predictions, factors = self.model(input_batch)
             truth = input_batch[:, 2]
@@ -190,7 +191,9 @@ class KGOptimizer(object):
         Returns:
             loss: torch.Tensor with loss averaged over all validation examples
         """
-        if isinstance(examples, torch.Tensor):
+        if not isinstance(examples, tuple):
+            if isinstance(examples, np.ndarray):
+                examples = torch.from_numpy(examples)
             b_begin = 0
             loss = 0.0
             counter = 0
@@ -202,16 +205,17 @@ class KGOptimizer(object):
                     counter += 1
             loss /= counter
         else:
+            examples_valid, labels = examples
+            if isinstance(examples_valid, np.ndarray):
+                examples_valid = torch.from_numpy(examples_valid)
+            b_begin = 0
             loss = 0.0
             counter = 0
-            examples_valid, labels = examples
-            if not isinstance(examples, torch.Tensor):
-                examples_valid = torch.from_numpy(examples)
             with torch.no_grad():
-                while b_begin < examples.shape[0]:
+                while b_begin < examples_valid.shape[0]:
                     input_batch = examples_valid[b_begin:b_begin + self.batch_size].to(self.device)
                     input_label = labels[b_begin:b_begin + self.batch_size].toarray()
-                    input_label = torch.from_numpy(input_label).to(self.device)
+                    input_label = torch.from_numpy(input_label).to(self.device).unsqueeze(-1)
                     b_begin += self.batch_size
                     loss += self.calculate_loss((input_batch, input_label))
                     counter += 1
@@ -229,8 +233,6 @@ class KGOptimizer(object):
         """
         if not isinstance(examples, tuple):
             actual_examples = examples[torch.randperm(examples.shape[0]), :]
-            if not isinstance(actual_examples, torch.Tensor):
-                actual_examples = torch.from_numpy(actual_examples)
             with tqdm.tqdm(total=examples.shape[0], unit='ex', disable=not self.verbose) as bar:
                 bar.set_description(f'train loss')
                 b_begin = 0
@@ -265,7 +267,7 @@ class KGOptimizer(object):
             if isinstance(examples, torch.Tensor):
                 actual_examples = examples[torch.from_numpy(perm), :]
             else:
-                actual_examples = examples[perm]
+                actual_examples = torch.from_numpy(examples[perm])
             actual_labels = labels[perm]
             with tqdm.tqdm(total=examples.shape[0], unit='ex', disable=not self.verbose) as bar:
                 bar.set_description(f'train loss')
@@ -273,10 +275,8 @@ class KGOptimizer(object):
                 total_loss = 0.0
                 counter = 0
                 while b_begin < examples.shape[0]:
-                    input_batch = actual_examples[b_begin:b_begin + self.batch_size]
+                    input_batch = actual_examples[b_begin:b_begin + self.batch_size].to(self.device)
                     input_label = actual_labels[b_begin:b_begin + self.batch_size].toarray()
-
-                    input_batch = torch.from_numpy(input_batch).to(self.device)
                     input_label = torch.from_numpy(input_label).to(self.device).unsqueeze(-1)
 
                     # gradient step

@@ -166,6 +166,11 @@ def train(args):
         test_relation_examples.append(dataset.get_examples("test", rel_idx=i))
     filters = dataset.get_filters()
 
+    if isinstance(train_examples, tuple):
+        print("Using labels for BCE smoothing.")
+    else:
+        print("Using the original dataset.")
+
     # save config
     with open(os.path.join(save_dir, "config.json"), "w") as fjson:
         json.dump(vars(args), fjson)

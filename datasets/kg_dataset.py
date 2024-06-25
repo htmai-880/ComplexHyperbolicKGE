@@ -103,6 +103,7 @@ class TrainDataset(SparseDataset):
         # Make a specific train filter
         self.train_filter = self.make_filters()
         self.targets = self.make_labels()
+        assert self.examples.shape[0] == self.targets.shape[0]
     
     def make_filters(self):
         # Train filter first
@@ -135,8 +136,8 @@ class TrainDataset(SparseDataset):
             for l in label:
                 row.append(i)
                 col.append(l)
-        labels = sp.csr_array(
-            (np.ones(len(row)), (row, col)), shape=(len(row), self.n_entities)
+        labels = sp.csr_matrix(
+            (np.ones(len(row)), (row, col)), shape=(self.examples.shape[0], self.n_entities)
         )
         return labels
 
@@ -192,7 +193,8 @@ class ValidDataset(SparseDataset):
     
         self.examples = self.get_examples()
         self.valid_filter = self.make_filters(train_dataset.train_filter)
-        self.targets = self.make_labels()        
+        self.targets = self.make_labels()
+        assert self.examples.shape[0] == self.targets.shape[0]
     
     def make_filters(self, train_filter):
         # deep copy of train filter
@@ -250,8 +252,8 @@ class ValidDataset(SparseDataset):
             for l in label:
                 row.append(i)
                 col.append(l)
-        labels = sp.csr_array(
-            (np.ones(len(row)), (row, col)), shape=(len(row), self.n_entities)
+        labels = sp.csr_matrix(
+            (np.ones(len(row)), (row, col)), shape=(self.examples.shape[0], self.n_entities)
         )
         return labels
     
