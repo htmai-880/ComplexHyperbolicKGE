@@ -43,15 +43,15 @@ class PoincareConv(MessagePassing):
         with torch.no_grad():
             nn.init.ones_(self.loop_curvature)
             self.w_activation.weight = nn.Parameter(torch.eye(self.in_channels, dtype=self.data_type))
-            kaiming_uniform_(self.w_loop)
-            kaiming_uniform_(self.w_in)
-            kaiming_uniform_(self.w_out)
-            kaiming_uniform_(self.b_loop)
-            kaiming_uniform_(self.b_in)
-            kaiming_uniform_(self.b_out)
+            xavier_uniform_(self.w_loop)
+            xavier_uniform_(self.w_in)
+            xavier_uniform_(self.w_out)
+            nn.init.zeros_(self.b_loop)
+            nn.init.zeros_(self.b_in)
+            nn.init.zeros_(self.b_out)
 
-            kaiming_uniform_(self.b_rel1)
-            kaiming_uniform_(self.b_rel2)
+            nn.init.zeros_(self.b_rel1)
+            nn.init.zeros_(self.b_rel2)
             
     def forward(self, x, edge_index, edge_type, rel_embed):
         if self.device is None:
@@ -148,42 +148,45 @@ class PoincareConv(MessagePassing):
                         edge_index[0],
                         dim_size=x.size(0)) # (N, D)
 
-            # # Do gyrobarycenter
-            # out = expmap0(out, loop_curvature)
-            # out_loop = expmap0(out_loop, loop_curvature)
-            # gamma_rel = torch.sum(out * out, dim=-1, keepdim=True)
-            # gamma_rel = 2 / (1 - loop_curvature * gamma_rel)
-            # rel_weight = 1 - loop_weight
-
-            # gamma_loop = torch.sum(out_loop * out_loop, dim=-1, keepdim=True)
-            # gamma_loop = 2 / (1 - loop_curvature * gamma_loop)
-            # # loop weight defined above
-            # den = rel_weight * (gamma_rel - 1) + loop_weight * (gamma_loop - 1)
-
-            # rel_weight = rel_weight * gamma_rel / den
-            # loop_weight = loop_weight * gamma_loop / den
-            # out = rel_weight * out  + loop_weight * out_loop
-            # factor = torch.sqrt(1 - loop_curvature * torch.sum(out * out, dim=-1, keepdim=True))
-            # factor = 1 / (1 + factor)
-            # out = factor * out
-            # out = logmap0(out, loop_curvature)
-
-            # out = (1 - loop_weight) * out + loop_weight * out_loop
-
             # Compute degrees
             degs = torch.ones_like(edge_norm)
             degs = scatter_("add", degs, edge_index[0], dim_size=x.size(0)).squeeze(1) # (N,)
             out_ = torch.zeros(out.size(0), out.size(1), dtype=out.dtype).to(self.device)
             out_[degs == 0] = out_loop[degs == 0]
 
-            out = expmap0((1 - loop_weight) * out[degs > 0], loop_curvature)
-            out_loop = expmap0(loop_weight * out_loop[degs > 0], loop_curvature)
-            out = project(
-                mobius_add(out, out_loop, loop_curvature),
-                loop_curvature
-            )
-            out = logmap0(out, loop_curvature)
-            out_[degs > 0] = out
+            # # Do gyrobarycenter
+            if (degs > 0).any():
+                out = expmap0(out[degs > 0], loop_curvature)
+                out_loop = expmap0(out_loop[degs > 0], loop_curvature)
+                gamma_rel = torch.sum(out * out, dim=-1, keepdim=True)
+                gamma_rel = 2 / (1 - loop_curvature * gamma_rel)
+                rel_weight = 1 - loop_weight
+
+                gamma_loop = torch.sum(out_loop * out_loop, dim=-1, keepdim=True)
+                gamma_loop = 2 / (1 - loop_curvature * gamma_loop)
+                # loop weight defined above
+                den = rel_weight * (gamma_rel - 1) + loop_weight * (gamma_loop - 1)
+
+                rel_weight = rel_weight * gamma_rel / den
+                loop_weight = loop_weight * gamma_loop / den
+                out = rel_weight * out  + loop_weight * out_loop
+                factor = torch.sqrt(1 - loop_curvature * torch.sum(out * out, dim=-1, keepdim=True))
+                factor = 1 / (1 + factor)
+                out = factor * out
+                out_[degs > 0] = logmap0(out, loop_curvature)
+
+            # out = (1 - loop_weight) * out + loop_weight * out_loop
+
+
+
+            # out = expmap0((1 - loop_weight) * out[degs > 0], loop_curvature)
+            # out_loop = expmap0(loop_weight * out_loop[degs > 0], loop_curvature)
+            # out = project(
+            #     mobius_add(out, out_loop, loop_curvature),
+            #     loop_curvature
+            # )
+            # out = logmap0(out, loop_curvature)
+            # out_[degs > 0] = out
             out = out_
 
         # Output of size [N, D] and lives in the tangent plane
@@ -261,12 +264,6 @@ class PoincareConv(MessagePassing):
 
 
     def message(self, x_j, edge_type, rel_embed, curvatures, mode):
-        # x_j is the neighbor embeddings
-        # edge_type is the type of the edge
-        # rel_embed is the embeddings of the relations
-        # edge_norm is the normalization factor for the edges
-        # mode is the direction of the edges
-        # Will use the inverse from the inverse relationship directly.
         weight = getattr(self, 'w_{}'.format(mode))
         x_j = x_j.unsqueeze(-2).unsqueeze(-2) # (E, 1, 1, D)
         x_j = (x_j @ weight).squeeze(-2).squeeze(-2) # (E, d)
@@ -290,28 +287,39 @@ class PoincareConv(MessagePassing):
 class PoincareGATConv(PoincareConv):
     def __init__(self, gather="mean", **kwargs):
         super(PoincareGATConv, self).__init__(**kwargs)
-        self.loop_rel = nn.Parameter(torch.randn(1, 3 * self.out_channels, dtype=self.data_type))
         self.leaky = torch.nn.LeakyReLU(negative_slope=0.2)
         self.heads = 4
 
         self.gather = gather
         out_att = self.out_channels if gather=="mean" else self.out_channels // self.heads
+        self.loop_rel = nn.Parameter(torch.randn(1, 3 * out_att, dtype=self.data_type))
 
         self.w_loop = nn.Parameter(torch.randn(self.heads, self.in_channels, out_att, dtype=self.data_type))
         self.w_in = nn.Parameter(torch.randn(self.heads, self.in_channels, out_att, dtype=self.data_type))
         self.w_out = nn.Parameter(torch.randn(self.heads, self.in_channels, out_att, dtype=self.data_type))
 
-        self.W_r = nn.Parameter(torch.randn(self.heads, 3 * self.out_channels, out_att, dtype=self.data_type))
+        self.b_loop = nn.Parameter(torch.randn(self.heads, out_att, dtype=self.data_type))
+        self.b_in = nn.Parameter(torch.randn(self.heads, out_att, dtype=self.data_type))
+        self.b_out = nn.Parameter(torch.randn(self.heads, out_att, dtype=self.data_type))
+
+
+        self.w_k_r = nn.Parameter(torch.randn(self.heads, 3*self.out_channels, 3*out_att, dtype=self.data_type))
+
+        self.W_r = nn.Parameter(torch.randn(self.heads, 3 * out_att, out_att, dtype=self.data_type))
         self.a_h = nn.Parameter(torch.randn(1, self.heads, out_att, dtype=self.data_type))
         self.a_r = nn.Parameter(torch.randn(1, self.heads, out_att, dtype=self.data_type))
         self.a_t = nn.Parameter(torch.randn(1, self.heads, out_att, dtype=self.data_type))
+        self.out_att = out_att
 
         with torch.no_grad():
-            nn.init.ones_(self.loop_curvature)
-            kaiming_uniform_(self.w_loop)
-            kaiming_uniform_(self.w_in)
-            kaiming_uniform_(self.w_out)
-            kaiming_uniform_(self.W_r)
+            xavier_uniform_(self.w_loop)
+            xavier_uniform_(self.w_in)
+            xavier_uniform_(self.w_out)
+            xavier_uniform_(self.W_r)
+            nn.init.zeros_(self.b_loop)
+            nn.init.zeros_(self.b_in)
+            nn.init.zeros_(self.b_out)
+
             xavier_normal_(self.a_h)
             xavier_normal_(self.a_r)
             xavier_normal_(self.a_t)
@@ -326,6 +334,8 @@ class PoincareGATConv(PoincareConv):
         in_index, out_index = edge_index[:, :num_edges], edge_index[:, num_edges:]
         in_type,  out_type  = edge_type[:num_edges], 	 edge_type [num_edges:]
         loop_index  = torch.arange(num_ent).to(self.device)
+
+        rel_embed = (rel_embed.unsqueeze(-2).unsqueeze(-2) @ self.w_k_r).squeeze(-2) # (N_r, k, d_r)
 
         # Lookup for tail entities in edges
         out_inward = self.message(
@@ -348,23 +358,54 @@ class PoincareGATConv(PoincareConv):
                                 x_i = out_loop, # (N, k, d)
                                 x_j = out, # (E, k, d)
                                 edge_type = edge_type,
-                                rel_embed = rel_embed.unsqueeze(1),
+                                rel_embed = rel_embed,
                                 curvatures=loop_curvature
                             ) # (E+N, k, 1) and (E+N, k, d), d = D if mean and d = D/k if concat
             # if self.gather == "mean":
-            head_index_ = torch.cat([edge_index[0], loop_index], dim=0)
+            # head_index_ = torch.cat([edge_index[0], loop_index], dim=0)
             # One could verify that the weights add up to 1.
-            out = edge_norm * out # (E+N, k, d)
+            # out = edge_norm * out # (E+N, k, d)
+            # if self.gather == "mean":
+            #     out = torch.mean(out, dim = 1)
+            # elif self.gather == "concat":
+            #     out = out.reshape(out.size(0), -1)
+            # Update
+            # out = scatter(out, head_index_, dim=0, out=None, dim_size=num_ent, reduce="add")
+
+
+
+            edge_index_ = torch.cat([edge_index, loop_index.repeat(2, 1)], dim=1) # [2, E+N]
+            out = self.update(out, edge_norm, edge_index_, loop_curvature, num_ent)
             if self.gather == "mean":
                 out = torch.mean(out, dim = 1)
             elif self.gather == "concat":
                 out = out.reshape(out.size(0), -1)
-            # Update
-            out = scatter(out, head_index_, dim=0, out=None, dim_size=num_ent, reduce="add")
-            del head_index_
+
+            # del head_index_
+            del edge_index_
         del in_index, out_index, in_type, out_type, loop_index
         return out
+    
+    def message(self, x_j, edge_type, rel_embed, curvatures, mode):
+        weight = getattr(self, 'w_{}'.format(mode))
+        x_j = x_j.unsqueeze(-2).unsqueeze(-2) # (E, 1, 1, D)
+        x_j = (x_j @ weight).squeeze(-2) # (E, k, d)
+        loop_curvature = F.softplus(self.loop_curvature)
+        x_j = expmap0(x_j, loop_curvature)
+        bias = getattr(self, 'b_{}'.format(mode))
+        bias = expmap0(bias, loop_curvature)
+        x_j = project(
+            mobius_add(x_j, bias, loop_curvature), loop_curvature
+        )
+        x_j = logmap0(x_j, loop_curvature)
+        if mode != "loop":
+            rel_c = torch.index_select(curvatures, 0, edge_type).unsqueeze(-2) if curvatures.nelement() > 1 else curvatures
+            rel_emb = torch.index_select(rel_embed, 0, edge_type) # (E, k, d_r)
+            x_j  = self.rel_transform(x_j, rel_emb, rel_c) # (E, k, D)
 
+        assert not torch.isnan(x_j).any(), "xj_rel contains nan values."
+        return x_j
+    
     def compute_norm(self, edge_index, num_ent, drop=False, x_i=None, x_j=None, edge_type=None, rel_embed=None, curvatures=None):
         # Input: (E, 1, d) or # (E, K, d)
         # Output: (E, k, 1)
@@ -376,11 +417,10 @@ class PoincareGATConv(PoincareConv):
 
         if (not edge_type is None) and (not rel_embed is None):
             # rel embed: (N_r, 1, d_r)
-            r = (rel_embed[..., :3*self.out_channels].unsqueeze(-2) @ self.W_r).squeeze(-2) # (N_r, K, d)
+            r = (rel_embed[..., :3*self.out_att].unsqueeze(-2) @ self.W_r).squeeze(-2) # (N_r, K, d)
             r_self = (self.loop_rel.view(1, 1, 1, -1) @ self.W_r).squeeze(-2) # (1, K, d)
-            # h_ij_tail = h_ij_tail + torch.cat([
-            #   r[head_entities], r_self.repeat(num_ent, 1, 1)
-            # ], dim=0)
+            # print(r.shape, r_self.shape, edge_type.shape)
+
         # Compute a_ij
         head_entities = torch.cat([head_entities, torch.arange(num_ent, device=head_entities.device)])
         a_ij = (self.a_h * x_i).sum(dim=-1, keepdim=True)[head_entities] # (E+N, K, 1)
@@ -431,7 +471,7 @@ class PoincareGCN(GNN):
             in_channels_r=3*self.rank,
             hidden_channels_r=3*self.hidden_dim,
             out_channels_r=3*self.hidden_dim,
-            layers=2,
+            layers=args.layers,
             act=tanh,
             act_r=tanh,
             mp=PoincareConv,
@@ -505,36 +545,26 @@ class PoincareGCN(GNN):
 class PoincareGAT(PoincareGCN):
     def __init__(self, args, dataset):
         super(PoincareGAT, self).__init__(args, dataset)
-        hidden_dim = args.hidden_dim if args.hidden_dim else self.rank
-        self.hidden_dim = hidden_dim
-        channels_r = 4 * args.rank
-        hidden_channels_r = 4 * hidden_dim
-        del self.layers
-        self.layers = nn.ModuleList([PoincareGATConv(
-            gather="concat",
-            in_channels=self.rank, out_channels=hidden_dim,
-            in_channels_r = channels_r, out_channels_r = hidden_channels_r,
-            act = tanh,
-            dropout = args.dropout,
-            dtype=args.dtype
-        )])
-        for _ in range(args.layers-2):
-            self.layers.append(PoincareGATConv(
-                gather="concat",
-                in_channels=hidden_dim, out_channels=hidden_dim,
-                in_channels_r = hidden_channels_r, out_channels_r = hidden_channels_r,
-                act = tanh,
-                dropout = args.dropout,
-                dtype=args.dtype
-            ))
-        self.layers.append(PoincareGATConv(
-            gather="mean",
-            in_channels= hidden_dim, out_channels = hidden_dim,
-            in_channels_r = hidden_channels_r, out_channels_r = hidden_channels_r,
-            act = None,
-            dropout = args.dropout,
-            dtype=args.dtype
-        ))
+        kwargs_last_layer = {
+            "gather": "mean"
+        }
+        self.base = PoincareBase(
+            in_channels=self.rank,
+            hidden_channels=self.hidden_dim,
+            out_channels=self.hidden_dim,
+            in_channels_r=3*self.rank,
+            hidden_channels_r=3*self.hidden_dim,
+            out_channels_r=3*self.hidden_dim,
+            layers=args.layers,
+            act=tanh,
+            act_r=tanh,
+            mp=PoincareGATConv,
+            dropout=args.dropout,
+            dtype=args.dtype,
+            kwargs_first_layer = {"gather" : "mean" if args.layers < 2 else "concat"},
+            kwargs_hidden_layer = {"gather" : "concat"},
+            kwargs_last_layer=kwargs_last_layer
+        )
 
 
 
@@ -564,14 +594,14 @@ class LorentzConv(MessagePassing):
         with torch.no_grad():
             nn.init.ones_(self.loop_curvature)
             self.w_activation.weight = nn.Parameter(torch.eye(self.in_channels, dtype=self.data_type))
-            kaiming_uniform_(self.w_loop)
-            kaiming_uniform_(self.w_in)
-            kaiming_uniform_(self.w_out)
-            kaiming_uniform_(self.b_loop)
-            kaiming_uniform_(self.b_in)
-            kaiming_uniform_(self.b_out)
-            kaiming_uniform_(self.b_rel1)
-            kaiming_uniform_(self.b_rel2)
+            xavier_uniform_(self.w_loop)
+            xavier_uniform_(self.w_in)
+            xavier_uniform_(self.w_out)
+            nn.init.zeros_(self.b_loop)
+            nn.init.zeros_(self.b_in)
+            nn.init.zeros_(self.b_out)
+            nn.init.zeros_(self.b_rel1)
+            nn.init.zeros_(self.b_rel2)
             
     def forward(self, x, edge_index, edge_type, rel_embed):
         if self.device is None:

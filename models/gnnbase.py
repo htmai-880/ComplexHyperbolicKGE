@@ -11,6 +11,10 @@ class GNN(KGModel):
         self.edge_dropout = nn.Dropout(args.edge_dropout)
                 # Fetch the triples from the dataset
         train_examples = dataset.get_examples("train")
+        if isinstance(train_examples, tuple):
+            train_examples = train_examples[0]
+        if not isinstance(train_examples, torch.Tensor):
+            train_examples = torch.from_numpy(train_examples)
         self.edge_index = train_examples[:, [0, 2]].t().contiguous()
         self.edge_type = train_examples[:, 1].contiguous()
         self.hidden_dim = args.hidden_dim if args.hidden_dim else self.rank

@@ -22,7 +22,12 @@ class KGOptimizer(object):
     """
 
     def __init__(
-            self, model, regularizer, optimizer, batch_size, update_steps, neg_sample_size, double_neg, optimizer2=None, smoothing=None, verbose=True):
+            self, model, regularizer, optimizer, batch_size,
+            update_steps,
+            neg_sample_size, double_neg, optimizer2=None,
+            loss = "crossentropy",
+            smoothing=None,
+            verbose=True,):
         """Inits KGOptimizer."""
         self.model = model
         self.regularizer = regularizer
@@ -35,13 +40,14 @@ class KGOptimizer(object):
         self.update_steps = update_steps
         self.verbose = verbose
         self.double_neg = double_neg
-        self.loss_fn = nn.CrossEntropyLoss(reduction='mean')
+        self.ce = nn.CrossEntropyLoss(reduction='mean', label_smoothing=0 if smoothing is None else smoothing)
         self.bce = nn.BCELoss(reduction='mean')
         self.neg_sample_size = neg_sample_size
         self.n_entities = model.sizes[0]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.device = torch.device("cpu")
         self.smoothing = smoothing
+        self.loss = loss
         
 
     def reduce_lr(self, factor=0.8):
@@ -173,10 +179,14 @@ class KGOptimizer(object):
         if self.neg_sample_size > 0:
             loss, factors = self.neg_sampling_loss(input_batch)
         else:
-            # predictions, factors = self.model(input_batch)
-            # truth = input_batch[:, 2]
-            # loss = self.loss_fn(predictions, truth.unsqueeze(1))
-            loss, factors = self.no_neg_sampling_loss(input_batch)
+            if self.loss == "crossentropy":
+                if isinstance(input_batch, tuple):
+                    input_batch = input_batch[0]
+                predictions, factors = self.model(input_batch)
+                truth = input_batch[:, 2]
+                loss = self.ce(predictions, truth.unsqueeze(1))
+            elif self.loss == "binarycrossentropy":
+                loss, factors = self.no_neg_sampling_loss(input_batch)
 
         # regularization loss
         loss += self.regularizer.forward(factors)

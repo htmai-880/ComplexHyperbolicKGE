@@ -72,6 +72,9 @@ parser.add_argument(
     "--neg_sample_size", default=50, type=int, help="Negative sample size, -1 to not use negative sampling"
 )
 parser.add_argument(
+    "--loss", default="crossentropy", type=str, help="Loss function to use (crossentropy, binarycrossentropy)"
+)
+parser.add_argument(
     "--dropout", default=0, type=float, help="Dropout rate"
 )
 parser.add_argument(
@@ -129,6 +132,7 @@ parser.add_argument(
 
 
 def train(args):
+    print("Training args: ", args)
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     # save_dir = get_savedir(args.model, args.dataset)
     save_dir = args.save_dir
@@ -184,10 +188,6 @@ def train(args):
     logging.info("Total number of parameters {}".format(total))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    # print(model)
-    # print("Model parameters: ", dict(model.named_parameters()))
-    # print("Layer parameters: ", dict(model.layers[0].named_parameters()))
-
 
     model.eval()
 
@@ -204,7 +204,7 @@ def train(args):
 
     optim_method = getattr(torch.optim, args.optimizer)(model.parameters(), lr=args.learning_rate)
     optimizer = KGOptimizer(model, regularizer, optim_method, args.batch_size, args.update_steps,
-                            args.neg_sample_size, bool(args.double_neg), smoothing=args.smoothing)
+                            args.neg_sample_size, bool(args.double_neg), loss=args.loss, smoothing=args.smoothing)
     counter = 0
     best_mrr = None
     best_epoch = None
