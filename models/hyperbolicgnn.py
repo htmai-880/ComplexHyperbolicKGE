@@ -282,6 +282,14 @@ class PoincareConv(MessagePassing):
 
         assert not torch.isnan(x_j).any(), "xj_rel contains nan values."
         return x_j
+    
+    def get_regularizable_params(self):
+        return [
+            self.w_loop,
+            self.w_in,
+            self.w_out,
+            self.w_rel.weight
+        ]
 
 
 class PoincareGATConv(PoincareConv):
@@ -442,6 +450,16 @@ class PoincareGATConv(PoincareConv):
         a_ij = a_ij / (sum_[head_entities] + 1e-8)
         del head_entities
         return a_ij, h_j_tail # (E+N, K, 1) and # (E+N, K, D)
+    
+    def get_regularizable_params(self):
+        return [
+            self.w_loop,
+            self.w_in,
+            self.w_out,
+            self.w_rel.weight,
+            self.w_k_r,
+            self.W_r,
+        ]
     
 class PoincareBase(BaseGNN):
     def __init__(self, **kwargs):

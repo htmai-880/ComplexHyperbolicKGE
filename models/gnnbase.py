@@ -110,3 +110,6 @@ class GNN(KGModel):
             while rhs_biases.dim() < 3:
                 rhs_biases = rhs_biases.unsqueeze(1)
         return rhs_e, rhs_biases
+
+    def get_factors(self, queries, tails=None):
+        return self.base.get_regularizable_params()

@@ -98,6 +98,9 @@ class MessagePassing(nn.Module):
         deg_inv[deg_inv	== float('inf')] = 0
         norm		= deg_inv[row] * edge_weight * deg_inv[col]
         return norm
+
+    def get_regularizable_params(self):
+        return [torch.tensor(0.0, device=self.device, dtype=self.data_type)]
     
     def __repr__(self):
         return '{}({}, {})'.format(
@@ -202,4 +205,11 @@ class BaseGNN(nn.Module):
                     x = self.drop(x)
                 rel_embed = self.act_r(rel_embed)
         return x, rel_embed
+    
+    def get_regularizable_params(self):
+        out = []
+        for layer in self.layers:
+            out.extend(layer.get_regularizable_params())
+        return out
+        
     

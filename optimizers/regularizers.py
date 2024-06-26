@@ -6,7 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 #
 from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import Tuple, List, Union
 
 import torch
 from torch import nn
@@ -14,7 +14,7 @@ from torch import nn
 
 class Regularizer(nn.Module, ABC):
     @abstractmethod
-    def forward(self, factors: Tuple[torch.Tensor]):
+    def forward(self, factors: Union[Tuple[torch.Tensor], List[torch.Tensor]]):
         pass
 
 
@@ -28,7 +28,17 @@ class F2(Regularizer):
         for f in factors:
             norm += self.weight * torch.sum(f ** 2)
         return norm / factors[0].shape[0]
+    
+class L2(Regularizer):
+    def __init__(self, weight: float):
+        super(L2, self).__init__()
+        self.weight = weight
 
+    def forward(self, factors):
+        norm = 0
+        for f in factors:
+            norm += self.weight * torch.sum(f ** 2)
+        return norm
 
 class N3(Regularizer):
     def __init__(self, weight: float):
