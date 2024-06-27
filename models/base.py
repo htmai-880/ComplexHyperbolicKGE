@@ -255,6 +255,9 @@ class KGModel(nn.Module, ABC):
                 scores = self.score(q, candidates) # (batch_size, 1, 1)
                 targets = self.score(q, rhs) # ???
                 # scores.masked_fill_(mask.unsqueeze(-1), -1e6)
+
+                assert not scores.isnan().any()
+                assert not targets.isnan().any()
                 
                 # set filtered and true scores to -1e6 to be ignored
                 # for i, query in enumerate(these_queries.cpu().numpy()):

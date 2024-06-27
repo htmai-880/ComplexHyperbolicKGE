@@ -3,6 +3,7 @@ from torch import nn
 from models.base import KGModel
 from datasets.kg_dataset import KGDataset
 from utils.euclidean import multi_index_select
+import numpy as np
 
 class GNN(KGModel):
     def __init__(self, args, dataset: KGDataset):
@@ -113,3 +114,100 @@ class GNN(KGModel):
 
     def get_factors(self, queries, tails=None):
         return self.base.get_regularizable_params()
+    
+    def get_ranking(self, queries, filters, batch_size=500, cache=None):
+        """Compute filtered ranking of correct entity for evaluation.
+
+        Args:
+            queries: torch.LongTensor with query triples (head, relation, tail)
+            filters: filters[(head, relation)] gives entities to ignore (filtered setting)
+            batch_size: int for evaluation batch size
+
+        Returns:
+            ranks: torch.Tensor with ranks or correct entities
+        """
+        ranks = torch.ones(len(queries), 1)
+        device = self.entity.weight.device
+        with torch.no_grad():
+            b_begin = 0
+            candidates = self.get_rhs(None)
+            while b_begin < len(queries):
+                these_queries = queries[b_begin:b_begin + batch_size]
+                # mask = torch.zeros((these_queries.size(0), self.entity.weight.size(0)), dtype=torch.bool)
+                # for i, query in enumerate(these_queries.numpy()):
+                #     mask[i, query[2]] = 1
+                #     mask[i, filters[tuple(query[:2])]] = 1
+                # mask = mask.to(device)
+                these_queries = these_queries.to(device)
+
+                q = self.get_queries(these_queries[..., :2], cache=cache) # (batch_size, 1, d)
+                rhs = self.get_rhs(these_queries[..., 2], cache=cache) # (batch_size, 1, d)
+                scores = self.score(q, candidates) # (batch_size, 1, 1)
+                targets = self.score(q, rhs) # ???
+                # scores.masked_fill_(mask.unsqueeze(-1), -1e6)
+
+                assert not scores.isnan().any()
+                assert not targets.isnan().any()
+                
+                # set filtered and true scores to -1e6 to be ignored
+                # for i, query in enumerate(these_queries.cpu().numpy()):
+                these_queries = these_queries.cpu().numpy()
+                for i, query in enumerate(these_queries):
+                    filter_out = filters[tuple(query[:2])]
+                    filter_out += [query[2].item()]
+                    scores[i, filter_out] = -1e6
+                ranks[b_begin:b_begin + batch_size] += torch.sum(
+                    (scores >= targets).float(), dim=1
+                ).cpu()
+                b_begin += batch_size
+                del these_queries
+                del q
+                del rhs
+                del scores
+                del targets
+        del candidates
+        gc.collect()
+        return ranks.squeeze(1)
+    
+    def compute_metrics(self, examples, filters, batch_size=10):
+        """Compute ranking-based evaluation metrics.
+        In comparison to before, this one caches the entity and relation embeddings from the last layer.
+    
+        Args:
+            examples: torch.LongTensor of size n_examples x 3 containing triples' indices
+            filters: Dict with entities to skip per query for evaluation in the filtered setting
+            batch_size: integer for batch size to use to compute scores
+
+        Returns:
+            Evaluation metrics (mean rank, mean reciprocical rank and hits)
+        """
+        mean_rank = {}
+        mean_reciprocal_rank = {}
+        hits_at = {}
+
+        # rhs
+        if isinstance(examples, tuple):
+            examples = examples[0]
+        if isinstance(examples, np.ndarray):
+            examples = torch.from_numpy(examples)
+        cache = self.forward_base()
+        q = examples
+        ranks = self.get_ranking(q, filters["rhs"], batch_size=batch_size, cache=cache)
+        mean_rank["rhs"] = torch.mean(ranks).item()
+        mean_reciprocal_rank["rhs"] = torch.mean(1. / ranks).item()
+        hits_at["rhs"] = torch.FloatTensor((list(map(
+            lambda x: torch.mean((ranks <= x).float()).item(),
+            (1, 3, 10)
+        ))))
+
+        # lhs
+        q = torch.stack([examples[..., 2], examples[..., 1] + self.sizes[1] // 2, examples[..., 0]], dim=-1)
+        ranks = self.get_ranking(q, filters["lhs"], batch_size=batch_size, cache=cache)
+        mean_rank["lhs"] = torch.mean(ranks).item()
+        mean_reciprocal_rank["lhs"] = torch.mean(1. / ranks).item()
+        hits_at["lhs"] = torch.FloatTensor((list(map(
+            lambda x: torch.mean((ranks <= x).float()).item(),
+            (1, 3, 10)
+        ))))
+        
+        return mean_rank, mean_reciprocal_rank, hits_at
