@@ -4,6 +4,7 @@ from models.base import KGModel
 from datasets.kg_dataset import KGDataset
 from utils.euclidean import multi_index_select
 import numpy as np
+import gc
 
 class GNN(KGModel):
     def __init__(self, args, dataset: KGDataset):
@@ -34,25 +35,27 @@ class GNN(KGModel):
         # For the user to write. For instance, for hyperbolic methods, we also need to include the curvature in the output.
         return torch.cat((self.rel.weight, self.rel_diag.weight), dim=-1)
 
-    def forward_base(self):
+    def forward_base(self, x = None, edge_index = None, edge_type = None, r = None):
         # x = tanh(self.entity.weight) # Typically, embeddings from language models will be reduced with an activation.
-        x = self.get_x()
-        r = self.get_r()
+        if x is None or r is None:
+            x = self.get_x()
+            r = self.get_r()
 
         # Dropout on edges
-        num_edges = self.edge_index.size(1) // 2
-        idx = torch.ones(num_edges)
-        idx = self.edge_dropout(idx).bool()
-        idx = idx.repeat(2)
-
-        edge_index = self.edge_index[:, idx].to(x.device)
-        edge_type = self.edge_type[idx].to(x.device)
+        if edge_index is None or edge_type is None:
+            num_edges = self.edge_index.size(1) // 2
+            idx = torch.ones(num_edges)
+            idx = self.edge_dropout(idx).bool()
+            idx = idx.repeat(2)
+            edge_index = self.edge_index[:, idx].to(x.device)
+            edge_type = self.edge_type[idx].to(x.device)
         del idx
 
         x, r = self.base(x, edge_index, edge_type, r)
 
         del edge_index
         del edge_type
+        gc.collect()
 
         return x, r
     
