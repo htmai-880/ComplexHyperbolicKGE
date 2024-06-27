@@ -35,10 +35,12 @@ class L2(Regularizer):
         self.weight = weight
 
     def forward(self, factors):
-        norm = 0
-        for f in factors:
-            norm += self.weight * torch.sum(f ** 2)
-        return norm
+        if self.weight > 0:
+            norm = 0
+            for f in factors:
+                norm += self.weight * torch.sum(f ** 2)
+            return norm
+        return 0
 
 class N3(Regularizer):
     def __init__(self, weight: float):

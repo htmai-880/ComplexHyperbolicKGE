@@ -735,6 +735,14 @@ class LorentzConv(MessagePassing):
         del in_index, in_type, out_index, out_type, loop_index
         return out
 
+    def get_regularizable_params(self):
+        return [
+            self.w_loop,
+            self.w_in,
+            self.w_out,
+            self.w_rel.weight
+        ]
+
     def rel_transform(self, ent_embed, rel_embed, curvatures):
         # Parametrize isometry in the same fashion as in RotH.
         # The relation embedding should be 3 times the entity embedding.

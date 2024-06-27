@@ -55,8 +55,7 @@ class GNN(KGModel):
 
         del edge_index
         del edge_type
-        gc.collect()
-
+        # Do NOT garbage collect. This makes training significantly slower.
         return x, r
     
     def forward(self, queries, tails=None):
@@ -116,6 +115,7 @@ class GNN(KGModel):
         return rhs_e, rhs_biases
 
     def get_factors(self, queries, tails=None):
+        # return (torch.tensor([0.], device=queries.device, dtype=self.data_type),)
         return self.base.get_regularizable_params()
     
     def get_ranking(self, queries, filters, batch_size=500, cache=None):
@@ -133,7 +133,7 @@ class GNN(KGModel):
         device = self.entity.weight.device
         with torch.no_grad():
             b_begin = 0
-            candidates = self.get_rhs(None)
+            candidates = self.get_rhs(None, cache=cache)
             while b_begin < len(queries):
                 these_queries = queries[b_begin:b_begin + batch_size]
                 # mask = torch.zeros((these_queries.size(0), self.entity.weight.size(0)), dtype=torch.bool)
@@ -194,6 +194,7 @@ class GNN(KGModel):
         if isinstance(examples, np.ndarray):
             examples = torch.from_numpy(examples)
         cache = self.forward_base()
+        # Cache to cpu
         q = examples
         ranks = self.get_ranking(q, filters["rhs"], batch_size=batch_size, cache=cache)
         mean_rank["rhs"] = torch.mean(ranks).item()
