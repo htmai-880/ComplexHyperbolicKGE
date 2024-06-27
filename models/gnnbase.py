@@ -118,7 +118,7 @@ class GNN(KGModel):
         # return (torch.tensor([0.], device=queries.device, dtype=self.data_type),)
         return self.base.get_regularizable_params()
     
-    def get_ranking(self, queries, filters, batch_size=500, cache=None):
+    def get_ranking(self, queries, filters, batch_size=500, chunk_size=1000, cache=None):
         """Compute filtered ranking of correct entity for evaluation.
 
         Args:
@@ -129,45 +129,61 @@ class GNN(KGModel):
         Returns:
             ranks: torch.Tensor with ranks or correct entities
         """
+        chunk_size = chunk_size if chunk_size > 0 else self.sizes[2]
         ranks = torch.ones(len(queries), 1)
         device = self.entity.weight.device
         with torch.no_grad():
-            b_begin = 0
-            candidates = self.get_rhs(None, cache=cache)
-            while b_begin < len(queries):
-                these_queries = queries[b_begin:b_begin + batch_size]
-                # mask = torch.zeros((these_queries.size(0), self.entity.weight.size(0)), dtype=torch.bool)
-                # for i, query in enumerate(these_queries.numpy()):
-                #     mask[i, query[2]] = 1
-                #     mask[i, filters[tuple(query[:2])]] = 1
-                # mask = mask.to(device)
-                these_queries = these_queries.to(device)
+            c_begin = 0
+            while c_begin < self.sizes[2]:
+                b_begin = 0
+                # candidates = self.get_rhs(None, cache=cache) # (1, n_entities, d)
+                c_top = min(c_begin + chunk_size, self.sizes[2])
+                idx_chunk = torch.arange(c_begin, c_top).to(device)
+                candidates = list(self.get_rhs(idx_chunk, cache=cache)) # (N,1,d)
+                del idx_chunk
+                candidates[0] = candidates[0].transpose(0, 1)
+                candidates[1] = candidates[1].transpose(0, 1)
+                while b_begin < len(queries):
+                    these_queries = queries[b_begin:b_begin + batch_size]
+                    # mask = torch.zeros((these_queries.size(0), self.entity.weight.size(0)), dtype=torch.bool)
+                    # for i, query in enumerate(these_queries.numpy()):
+                    #     mask[i, query[2]] = 1
+                    #     mask[i, filters[tuple(query[:2])]] = 1
+                    # mask = mask.to(device)
+                    these_queries = these_queries.to(device)
 
-                q = self.get_queries(these_queries[..., :2], cache=cache) # (batch_size, 1, d)
-                rhs = self.get_rhs(these_queries[..., 2], cache=cache) # (batch_size, 1, d)
-                scores = self.score(q, candidates) # (batch_size, 1, 1)
-                targets = self.score(q, rhs) # ???
-                # scores.masked_fill_(mask.unsqueeze(-1), -1e6)
+                    q = self.get_queries(these_queries[..., :2], cache=cache) # (batch_size, 1, d)
+                    rhs = self.get_rhs(these_queries[..., 2], cache=cache) # (batch_size, 1, d)
+                    scores = self.score(q, candidates) # (batch_size, 1, 1)
+                    targets = self.score(q, rhs) # ???
+                    # scores.masked_fill_(mask.unsqueeze(-1), -1e6)
 
-                assert not scores.isnan().any()
-                assert not targets.isnan().any()
-                
-                # set filtered and true scores to -1e6 to be ignored
-                # for i, query in enumerate(these_queries.cpu().numpy()):
-                these_queries = these_queries.cpu().numpy()
-                for i, query in enumerate(these_queries):
-                    filter_out = filters[tuple(query[:2])]
-                    filter_out += [query[2].item()]
-                    scores[i, filter_out] = -1e6
-                ranks[b_begin:b_begin + batch_size] += torch.sum(
-                    (scores >= targets).float(), dim=1
-                ).cpu()
-                b_begin += batch_size
-                del these_queries
-                del q
-                del rhs
-                del scores
-                del targets
+                    assert not scores.isnan().any()
+                    assert not targets.isnan().any()
+                    
+                    # set filtered and true scores to -1e6 to be ignored
+                    # for i, query in enumerate(these_queries.cpu().numpy()):
+                    these_queries = these_queries.cpu().numpy()
+                    for i, query in enumerate(these_queries):
+                        filter_out = filters[tuple(query[:2])]
+                        filter_out += [query[2].item()]
+                        if chunk_size < self.sizes[2]:
+                            filter_in_chunk = [
+                                int(k - c_begin) for k in filter_out if c_begin <= k < c_top
+                            ]
+                            scores[i, filter_in_chunk] = -1e6
+                        else:
+                            scores[i, filter_out] = -1e6
+                    ranks[b_begin:b_begin + batch_size] += torch.sum(
+                        (scores >= targets).float(), dim=1
+                    ).cpu()
+                    b_begin += batch_size
+                    del these_queries
+                    del q
+                    del rhs
+                    del scores
+                    del targets
+                c_begin += chunk_size
         del candidates
         gc.collect()
         return ranks.squeeze(1)
