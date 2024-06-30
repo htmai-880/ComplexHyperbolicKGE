@@ -28,8 +28,11 @@ class GNN(KGModel):
         else:
             nn.Module.__setattr__(self, name, value)
     
-    def get_x(self):
-        return self.entity.weight
+    def get_x(self, x = None):
+        if x is None:
+            return self.entity.weight
+        # Then x contains a N x 1 vector with the indices of the entities to fetch
+        return self.entity(x.view(-1))
     
     def get_r(self):
         # For the user to write. For instance, for hyperbolic methods, we also need to include the curvature in the output.
@@ -37,19 +40,41 @@ class GNN(KGModel):
 
     def forward_base(self, x = None, edge_index = None, edge_type = None, r = None):
         # x = tanh(self.entity.weight) # Typically, embeddings from language models will be reduced with an activation.
-        if x is None or r is None:
-            x = self.get_x()
-            r = self.get_r()
+        x = self.get_x(x)
+        r = self.get_r()
 
         # Dropout on edges
         if edge_index is None or edge_type is None:
-            num_edges = self.edge_index.size(1) // 2
-            idx = torch.ones(num_edges)
+            mask = self.edge_type < self.rel.weight.size(0) // 2
+            edge_index = self.edge_index[:, mask].to(x.device)
+            edge_type = self.edge_type[mask].to(x.device)
+            idx = torch.ones_like(edge_type).float()
             idx = self.edge_dropout(idx).bool()
-            idx = idx.repeat(2)
-            edge_index = self.edge_index[:, idx].to(x.device)
-            edge_type = self.edge_type[idx].to(x.device)
-        del idx
+            edge_type = edge_type[idx]
+            edge_index = edge_index[:, idx]
+
+            # Add inverse edges
+            edge_index_inv = torch.stack((edge_index[1], edge_index[0]), dim=0)
+            edge_type_inv = edge_type + self.rel.weight.size(0) // 2
+            edge_index = torch.cat((edge_index, edge_index_inv), dim=-1)
+            edge_type = torch.cat((edge_type, edge_type_inv), dim=0)
+            del idx, mask, edge_index_inv, edge_type_inv
+        else:
+            mask = edge_type < self.rel.weight.size(0) // 2
+            edge_index = edge_index[:, mask].to(x.device)
+            edge_type = edge_type[mask].to(x.device)
+            idx = torch.ones_like(edge_type).float()
+            idx = self.edge_dropout(idx).bool()
+            edge_type = edge_type[idx]
+            edge_index = edge_index[:, idx]
+
+            # Add inverse edges
+            edge_index_inv = torch.stack((edge_index[1], edge_index[0]), dim=0)
+            edge_type_inv = edge_type + self.rel.weight.size(0) // 2
+            edge_index = torch.cat((edge_index, edge_index_inv), dim=-1)
+            edge_type = torch.cat((edge_type, edge_type_inv), dim=0)
+            del idx, mask, edge_index_inv, edge_type_inv
+            
 
         x, r = self.base(x, edge_index, edge_type, r)
 
@@ -58,12 +83,13 @@ class GNN(KGModel):
         # Do NOT garbage collect. This makes training significantly slower.
         return x, r
     
-    def forward(self, queries, tails=None):
+    def forward(self, queries, tails=None, x = None, edge_index=None, edge_type=None):
         """KGModel forward pass. For GNNs, we will cache the embeddings and relations returned by the forward_base method.
 
         Args:
             queries: torch.LongTensor with query triples (head, relation)
             tails: torch.LongTensor with tails
+            g: Data object with the graph
         Returns:
             predictions: torch.Tensor with triples' scores
                          shape is (n_queries x 1) if eval_mode is false
@@ -75,11 +101,11 @@ class GNN(KGModel):
         if tails is not None:
             while tails.dim() < 2:
                 tails = tails.unsqueeze(0)
-        cache = self.forward_base()
+        cache = self.forward_base(x=x, edge_index=edge_index, edge_type=edge_type)
         # get embeddings and similarity scores
         lhs_e, lhs_biases = self.get_queries(queries, cache=cache)
         # queries = F.dropout(queries, self.dropout, training=self.training)
-        rhs_e, rhs_biases = self.get_rhs(tails, cache=cache)
+        rhs_e, rhs_biases = self.get_rhs(tails, cache=cache, tails_idx=x.squeeze(-1) if not x is None else None)
         # candidates = F.dropout(candidates, self.dropout, training=self.training)
         predictions = self.score((lhs_e, lhs_biases), (rhs_e, rhs_biases))
 
@@ -95,13 +121,15 @@ class GNN(KGModel):
             x, r = cache
         pass
 
-    def get_rhs(self, tails=None, cache=None):
+    def get_rhs(self, tails=None, cache=None, tails_idx=None):
         if cache is None:
             x, r = self.forward_base()
         else:
             x, r = cache
         if tails is None:
-            rhs_e, rhs_biases = x, self.bt.weight
+            # The input graph might be just a subgraph of the full graph, so we need to select the
+            # embeddings of the entities in the subgraph.
+            rhs_e, rhs_biases = x, (self.bt.weight if tails_idx is None else self.bt(tails_idx))
             while rhs_e.dim() < 3:
                 rhs_e = rhs_e.unsqueeze(0)
             while rhs_biases.dim() < 3:

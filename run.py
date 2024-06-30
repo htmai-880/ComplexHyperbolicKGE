@@ -13,9 +13,9 @@ import torch.optim
 import models
 import optimizers.regularizers as regularizers
 
-from datasets.kg_dataset import KGDataset, KGDataset2
+from datasets.kg_dataset import KGDataset, KGDataset2, KGDataset3
 from models import all_models
-from optimizers.kg_optimizer import KGOptimizer
+from optimizers.kg_optimizer import KGOptimizer, KGOptimizerSubgraph
 from utils.train import get_savedir, avg_both, format_metrics, count_params
 from utils.complexhyperbolic import euclidean_update, poincare_grad, poincare_update, full_p_exp_map, p_sum#, RiemannianSGD, rgrad, expm
 
@@ -157,7 +157,7 @@ def train(args):
     # create dataset
     dataset_path = os.path.join(DATA_PATH, args.dataset)
     # dataset = KGDataset(dataset_path, args.debug)
-    dataset = KGDataset2(dataset_path, args.debug, args.batch_size, args.dtype)
+    dataset = KGDataset3(dataset_path, args.debug)
     args.sizes = dataset.get_shape()
 
     # load data
@@ -191,20 +191,23 @@ def train(args):
 
     model.eval()
 
-    # Validation metrics
-    valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
-    logging.info(format_metrics(valid_metrics, split="valid"))
+    # # Validation metrics
+    # valid_metrics = avg_both(*model.compute_metrics(valid_examples, filters, args.eval_batch_size))
+    # logging.info(format_metrics(valid_metrics, split="valid"))
 
-    # Test metrics
-    test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
-    logging.info(format_metrics(test_metrics, split="test"))
+    # # Test metrics
+    # test_metrics = avg_both(*model.compute_metrics(test_examples, filters, args.eval_batch_size))
+    # logging.info(format_metrics(test_metrics, split="test"))
 
     # get optimizer
     regularizer = getattr(regularizers, args.regularizer)(args.reg)
 
     optim_method = getattr(torch.optim, args.optimizer)(model.parameters(), lr=args.learning_rate)
-    optimizer = KGOptimizer(model, regularizer, optim_method, args.batch_size, args.update_steps,
-                            args.neg_sample_size, bool(args.double_neg), loss=args.loss, smoothing=args.smoothing)
+    # optimizer = KGOptimizer(model, regularizer, optim_method, args.batch_size, args.update_steps,
+    #                         args.neg_sample_size, bool(args.double_neg), loss=args.loss, smoothing=args.smoothing)
+    optimizer = KGOptimizerSubgraph(model, regularizer, optim_method, args.batch_size, args.update_steps,
+                           args.neg_sample_size, bool(args.double_neg), loss=args.loss, smoothing=args.smoothing, dataset=dataset)
+    
     counter = 0
     best_mrr = None
     best_epoch = None

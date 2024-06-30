@@ -105,9 +105,11 @@ class PoincareConv(MessagePassing):
         if curvatures is None:
             # Use loop curvature as unique curvature
             curvatures = loop_curvature
+
+        mask = edge_type < rel_embed.size(0)//2
         
-        in_index, out_index = edge_index[:, :num_edges], edge_index[:, num_edges:]
-        in_type,  out_type  = edge_type[:num_edges], 	 edge_type [num_edges:]
+        in_index, out_index = edge_index[:, mask], edge_index[:, ~mask]
+        in_type,  out_type  = edge_type[mask], 	 edge_type [~mask]
 
         loop_index  = torch.arange(num_ent).to(self.device)
         # loop_type   = torch.full((num_ent,), loop_relation, dtype=torch.long).to(self.device)
@@ -138,7 +140,7 @@ class PoincareConv(MessagePassing):
         # We can perform aggregation in the tangent space
         if method == 1:
             out = torch.cat([out_inward, out_outward], dim=0)
-            edge_norm = self.compute_norm(edge_index, x.size(0), drop=False).unsqueeze(1)
+            edge_norm = self.compute_symmetric_norm(edge_index, x.size(0), drop=False).unsqueeze(1)
             loop_weight = F.sigmoid(self.loop_weight)
             out = edge_norm * out # (E, D) for neighbors
             # deal with self-loops now
@@ -495,9 +497,9 @@ class PoincareGCN(GNN):
         c = self.c_layer.weight # (N_r, 1)
         return (r, c)
     
-    def forward_base(self):
+    def forward_base(self, x=None, edge_index=None, edge_type=None, rel_embed=None):
         # Use the forward_base from the super class
-        x, (r, c) = super().forward_base()
+        x, (r, c) = super().forward_base(x, edge_index, edge_type, rel_embed)
 
         c = F.softplus(c)
         if not self.multi_c and c.nelement() > 1:

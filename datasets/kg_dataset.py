@@ -9,6 +9,8 @@ from torch.utils.data import Dataset, DataLoader
 import scipy.sparse as sp
 from .sparse import SparseDataset, sparse_batch_collate
 from torch.utils.data.sampler import BatchSampler, RandomSampler
+from torch_geometric.data import Data
+from torch_geometric.loader import LinkNeighborLoader
 
 class KGDataset(object):
     """Knowledge Graph dataset class."""
@@ -66,252 +68,157 @@ class KGDataset(object):
     def get_shape(self):
         """Returns KG dataset shape."""
         return self.n_entities, self.n_predicates, self.n_entities
+    
+class KGDataset2(KGDataset):
+    def __init__(self, data_path, debug):
+        super(KGDataset2, self).__init__(data_path, debug)
 
-
-class TrainDataset(SparseDataset):
-    """Knowledge Graph dataset class."""
-
-    def __init__(self, data_path, debug, dtype=None):
-        """Creates KG dataset object for data loading.
-
-        Args:
-             data_path: Path to directory containing train/valid/test pickle files produced by process.py
-             debug: boolean indicating whether to use debug mode or not
-             if true, the dataset will only contain 1000 examples for debugging.
-        """
-        self.data_path = data_path
-        self.debug = debug
-        self.data = {}
-
-        if dtype == None:
-            self.data_type = torch.float
-        elif dtype == "double":
-            self.data_type = torch.double
-        elif dtype == "float":
-            self.data_type = torch.float
-
-        split = "train"
-        file_path = os.path.join(self.data_path, split + ".pickle")
-        with open(file_path, "rb") as in_file:
-            self.data = pkl.load(in_file)
-
-        max_axis = np.max(self.data, axis=0)
-        self.n_entities = int(max(max_axis[0], max_axis[2]) + 1)
-        self.n_predicates = int(max_axis[1] + 1) * 2
-
-        self.examples = self.get_examples()
+        # Get train examples
+        train_examples = self.data["train"]
         # Make a specific train filter
-        self.train_filter = self.make_filters()
-        self.targets = self.make_labels()
-        assert self.examples.shape[0] == self.targets.shape[0]
+        self.train_filter = self.make_train_filter(train_examples, None)
+        valid_examples = self.data["valid"]
+        # Make a specific valid filter
+        self.valid_filter = self.make_train_filter(valid_examples, self.train_filter)
     
-    def make_filters(self):
+    def make_train_filter(self, examples, other_filter=None):
         # Train filter first
-        train_filter = dict()
-        # rhs filter
-        train_filter["rhs"] = dict()
-        train_filter["lhs"] = dict()
-        for sub, rel, obj in self.examples:
-            if (sub, rel) not in train_filter["rhs"]:
-                train_filter["rhs"][(sub, rel)] = set()
-            train_filter["rhs"][(sub, rel)].add(obj)
-            if (rel, obj) not in train_filter["lhs"]:
-                train_filter["lhs"][(rel, obj)] = set()
-            train_filter["lhs"][(rel, obj)].add(sub)
+        filter = dict() if other_filter is None else copy.deepcopy(other_filter)
+        if not other_filter is None:
+            # Turn lists to sets
+            for key in filter:
+                filter[key] = set(filter[key])
 
+        n_relations = self.n_predicates // 2
+        for sub, rel, obj in examples:
+            if (sub, rel) not in filter:
+                filter[(sub, rel)] = set()
+            filter[(sub, rel)].add(obj)
+            if (obj, rel + n_relations) not in filter:
+                filter[(obj, rel + n_relations)] = set()
+            filter[(obj, rel + n_relations)].add(sub)
         # Turn sets to lists
-        for key in train_filter["rhs"]:
-            train_filter["rhs"][key] = list(train_filter["rhs"][key])
-        for key in train_filter["lhs"]:
-            train_filter["lhs"][key] = list(train_filter["lhs"][key])
-
-        return train_filter
+        for key in filter:
+            filter[key] = list(filter[key])
+        return filter
     
-    def make_labels(self):
+    def make_labels(self, examples, filter):
         # Make labels as sparse tensor
         row, col = [], []
-        filters = self.train_filter
-        for i, (sub, rel, obj) in enumerate(self.examples):
-            label = filters["rhs"][(sub, rel)]
+        for i, (sub, rel, obj) in enumerate(examples):
+            label = filter[(sub, rel)]
             for l in label:
                 row.append(i)
                 col.append(l)
         labels = sp.csr_matrix(
-            (np.ones(len(row)), (row, col)), shape=(self.examples.shape[0], self.n_entities)
+            (np.ones(len(row)), (row, col)), shape=(examples.shape[0], self.n_entities)
         )
         return labels
+    
+    def get_examples(self, split, rel_idx=-1):
+        examples = super().get_examples(split, rel_idx).numpy()
+        if split == "test":
+            return examples, None
+        filter = {
+            "train": self.train_filter,
+            "valid": self.valid_filter
+        }[split]
+        labels = self.make_labels(examples, filter)
+        return examples, labels
+    
 
-    def get_examples(self, rel_idx=-1):
-        """Get examples in a split.
 
-        Args:
-            split: String indicating the split to use (train/valid/test)
-            rel_idx: integer for relation index to keep (-1 to keep all relation)
-
-        Returns:
-            examples: torch.LongTensor containing KG triples in a split
-        """
-        examples = self.data
-        copy = np.copy(examples)
+class KGDataset3(KGDataset):
+    def __init__(self, data_path, debug):
+        super(KGDataset3, self).__init__(data_path, debug)
+        # Create PyG Data from it
+        train_examples = self.data["train"]
+        # add inverse triples
+        copy = np.copy(train_examples)
         tmp = np.copy(copy[:, 0])
         copy[:, 0] = copy[:, 2]
         copy[:, 2] = tmp
         copy[:, 1] += self.n_predicates // 2
-        examples = np.vstack((examples, copy))
-        if rel_idx >= 0:
-            examples = examples[examples[:, 1] == rel_idx]
-        if self.debug:
-            examples = examples[:1000]
-        return examples.astype("int64")
+        train_examples = np.copy(np.vstack((train_examples, copy)))
 
-    def get_filters(self, split=None):
-        """Return filter dict to compute ranking metrics in the filtered setting."""
-        return self.train_filter
+        valid_triples = self.data["valid"]
+        # add inverse triples
+        copy = np.copy(valid_triples)
+        tmp = np.copy(copy[:, 0])
+        copy[:, 0] = copy[:, 2]
+        copy[:, 2] = tmp
+        copy[:, 1] += self.n_predicates // 2
+        valid_triples = np.copy(np.vstack((valid_triples, copy)))
 
-    def get_shape(self):
-        """Returns KG dataset shape."""
-        return self.n_entities, self.n_predicates, self.n_entities
-    
-
-class ValidDataset(SparseDataset):
-    """Knowledge Graph dataset class."""
-    def __init__(self, train_dataset):
-        # Initialize from the train dataset
-        self.data_path = train_dataset.data_path
-        self.debug = train_dataset.debug
-        self.data_type = train_dataset.data_type
-
-
-        self.data = {}
-        split = "valid"
-        file_path = os.path.join(self.data_path, split + ".pickle")
-        with open(file_path, "rb") as in_file:
-            self.data = pkl.load(in_file)
-
-        self.n_entities = train_dataset.n_entities
-        self.n_predicates = train_dataset.n_predicates
-    
-        self.examples = self.get_examples()
-        self.valid_filter = self.make_filters(train_dataset.train_filter)
-        self.targets = self.make_labels()
-        assert self.examples.shape[0] == self.targets.shape[0]
-    
-    def make_filters(self, train_filter):
-        # deep copy of train filter
-        valid_filter = copy.deepcopy(train_filter)
-        # To set:
-        for key in valid_filter["rhs"]:
-            valid_filter["rhs"][key] = set(valid_filter["rhs"][key])
-        for key in valid_filter["lhs"]:
-            valid_filter["lhs"][key] = set(valid_filter["lhs"][key])
-
-        # Valid filter from valid examples
-        for sub, rel, obj in self.examples:
-            if (sub, rel) not in valid_filter["rhs"]:
-                valid_filter["rhs"][(sub, rel)] = set()
-            valid_filter["rhs"][(sub, rel)].add(obj)
-            if (rel, obj) not in valid_filter["lhs"]:
-                valid_filter["lhs"][(rel, obj)] = set()
-            valid_filter["lhs"][(rel, obj)].add(sub)
-        
-        # Turn sets to lists
-        for key in valid_filter["rhs"]:
-            valid_filter["rhs"][key] = list(valid_filter["rhs"][key])
-        for key in valid_filter["lhs"]:
-            valid_filter["lhs"][key] = list(valid_filter["lhs"][key])
-        return valid_filter
-
-    def get_examples(self, rel_idx=-1):
-        """Get examples in a split.
-
-        Args:
-            split: String indicating the split to use (train/valid/test)
-            rel_idx: integer for relation index to keep (-1 to keep all relation)
-
-        Returns:
-            examples: torch.LongTensor containing KG triples in a split
-        """
-        examples = self.data
-        if rel_idx >= 0:
-            examples = examples[examples[:, 1] == rel_idx]
-        if self.debug:
-            examples = examples[:1000]
-        return examples.astype("int64")
-    
-    def get_label(self, label):
-        y = np.zeros([self.n_entities])
-        y[label] = 1
-        return torch.from_numpy(y, dtype=self.data_type)
-    
-    def make_labels(self):
-        # Make labels as sparse tensor
-        row, col = [], []
-        filters = self.valid_filter
-        for i, (sub, rel, obj) in enumerate(self.examples):
-            label = filters["rhs"][(sub, rel)]
-            for l in label:
-                row.append(i)
-                col.append(l)
-        labels = sp.csr_matrix(
-            (np.ones(len(row)), (row, col)), shape=(self.examples.shape[0], self.n_entities)
+        # Stack all triples
+        all_triples = np.vstack((train_examples, valid_triples))
+        all_triples = torch.from_numpy(all_triples.astype("int64"))
+        train_mask = torch.zeros(all_triples.size(0), dtype=torch.bool)
+        train_mask[:train_examples.shape[0]] = True
+        self.g = Data(
+            x = torch.arange(self.n_entities).unsqueeze(-1),
+            edge_index=all_triples[:, [0, 2]].t().contiguous(),
+            edge_type=all_triples[:, 1],
+            train_mask=train_mask,
+            val_mask=~train_mask,
+            num_nodes=self.n_entities
         )
-        return labels
+        print("PyG Graph: ", self.g)
+
+    def make_loader(self, batch_size=4, shuffle=True, num_workers=-1, split="train"):
+        return LinkNeighborLoader(
+            self.g,
+            num_neighbors=[20,20,10],
+            batch_size=batch_size,
+            edge_label_index=self.g.edge_index[:, self.g.train_mask] if split=="train" else self.g.edge_index,
+            shuffle=shuffle,
+            num_workers=num_workers
+        )
     
-    def get_filters(self, split=None):
-        """Return filter dict to compute ranking metrics in the filtered setting."""
-        return self.valid_filter
-    
-    def get_shape(self):
-        """Returns KG dataset shape."""
-        return self.n_entities, self.n_predicates, self.n_entities
-    
-
-class KGDataset2(object):
-    def __init__(self, data_path, debug, batch_size = 100, dtype=None):
-        self.data_path = data_path
-        self.debug = debug
-        self.data = {}
-        for split in ["test"]:
-            file_path = os.path.join(self.data_path, split + ".pickle")
-            with open(file_path, "rb") as in_file:
-                self.data[split] = pkl.load(in_file)
-            
-        self.train_dataset = TrainDataset(data_path, debug, dtype)
-        self.valid_dataset = ValidDataset(self.train_dataset)
-
-        filters_file = open(os.path.join(self.data_path, "to_skip.pickle"), "rb")
-        self.to_skip = pkl.load(filters_file)
-        filters_file.close()
-
-        self.n_entities = self.train_dataset.n_entities
-        self.n_predicates = self.train_dataset.n_predicates
-
-    def get_filters(self, ):
-        """Return filter dict to compute ranking metrics in the filtered setting."""
-        return self.to_skip
-
-    def get_shape(self):
-        """Returns KG dataset shape."""
-        return self.n_entities, self.n_predicates, self.n_entities
-    
-    def get_examples(self, split, rel_idx=-1):
-        """Get examples in a split.
+    def make_labels(self, subgraph_g, split="train"):
+        """Make a B x N sparse tensor containing the labels for each edge in the subgraph. B is the number of queries and N is the number of nodes in the subgraph.
 
         Args:
-            split: String indicating the split to use (train/valid/test)
-            rel_idx: integer for relation index to keep (-1 to keep all relation)
-
+            subgraph_g (Data): The subgraph containing the edges and nodes.
+            n_predicates (int): The number of predicates in the entire graph.
+        
         Returns:
-            examples: torch.LongTensor containing KG triples in a split
+            torch.sparse.FloatTensor: The labels for each edge in the subgraph. output[i, j] = 1 if the j-th node is the target of the i-th query.
         """
-        if split=="train":
-            examples = self.train_dataset.examples, self.train_dataset.targets
-        elif split=="valid":
-            examples = self.valid_dataset.examples, self.valid_dataset.targets
+        n_predicates = self.n_predicates
+        if split == "train":
+            edge_index = subgraph_g.edge_index[:, subgraph_g.train_mask]
+            edge_type = subgraph_g.edge_type[subgraph_g.train_mask]
+        elif split == "val":
+            edge_index = subgraph_g.edge_index[:, subgraph_g.val_mask | subgraph_g.train_mask]
+            edge_type = subgraph_g.edge_type[subgraph_g.val_mask | subgraph_g.train_mask]
         else:
-            examples = self.data[split]
-            if rel_idx >= 0:
-                examples = examples[examples[:, 1] == rel_idx]
-            if self.debug:
-                examples = examples[:1000]
-        return examples
+            edge_index = subgraph_g.edge_index
+            edge_type = subgraph_g.edge_type
+        queries = edge_index[0] * n_predicates + edge_type
+        targets = edge_index[1]
+        ind = torch.stack([queries, targets]).to(queries.device)
+        labels = torch.sparse_coo_tensor(
+            indices=ind,
+            values=torch.ones_like(queries),
+            size=(n_predicates * subgraph_g.num_nodes, subgraph_g.num_nodes),
+            device=queries.device
+        )
+        return torch.index_select(labels, 0, queries)
+
+
+    def make_subgraph(self, batch, split="train", return_labels=False):
+        subgraph_g = self.g.subgraph(batch.n_id) # Note: this subgraph is more complete than the one in input
+        if not return_labels:
+            return (subgraph_g,)
+        labels = self.make_labels(subgraph_g, split=split)
+        return subgraph_g, labels
+    
+    def get_triples(self, subgraph, split="train"):
+        edge_index = subgraph.edge_index[:, subgraph.train_mask] if split == "train" else subgraph.edge_index
+        edge_type = subgraph.edge_type[subgraph.train_mask] if split == "train" else subgraph.edge_type
+        return torch.stack([edge_index[0], edge_type, edge_index[1]], dim=1)
+
+
+        
+

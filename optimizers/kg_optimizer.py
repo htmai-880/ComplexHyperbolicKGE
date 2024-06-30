@@ -5,6 +5,10 @@ import tqdm
 import torch
 import torch.nn.functional as F
 from torch import nn
+from datasets.kg_dataset import KGDataset3
+from models.gnnbase import GNN
+from typing import Optional
+import time
 
 
 class KGOptimizer(object):
@@ -310,4 +314,101 @@ class KGOptimizer(object):
                     bar.set_postfix(loss=f'{l.item():.4f}')
             total_loss /= counter
         return total_loss
+
+
+class KGOptimizerSubgraph(KGOptimizer):
+    """Knowledge Graph embedding model optimizer with subgraph sampling.
+
+    KGOptimizerSubgraph
+    """
+    def __init__(self, model, regularizer, optimizer, batch_size, update_steps, neg_sample_size, double_neg, optimizer2=None, loss="crossentropy", smoothing=None, verbose=True, dataset: Optional[KGDataset3] = None):
+        assert isinstance(model, GNN), f"Model {type(model)} must be a GNN"
+        super(KGOptimizerSubgraph, self).__init__(model=model, regularizer=regularizer, optimizer=optimizer, batch_size=batch_size,
+                                                  update_steps=update_steps, neg_sample_size=neg_sample_size, double_neg=double_neg,
+                                                    optimizer2=optimizer2, loss=loss, smoothing=smoothing, verbose=verbose)
+        self.dataset = dataset
+        self.loader = self.dataset.make_loader(batch_size=8, shuffle=True, num_workers=4)
+
+    def epoch(self, examples):
+        """Runs one epoch of training KG embedding model.
+
+        Args:
+            examples: torch.LongTensor of shape (N_train x 3) with training triples
+
+        Returns:
+            loss: torch.Tensor with loss averaged over all training examples
+        """
+        device = self.device
+        with tqdm.tqdm(self.loader, unit='batch', disable=not self.verbose) as bar:
+            bar.set_description(f'train loss')
+            total_loss = 0.0
+            counter = 0
+            for batch in bar:
+                subgraph = batch.to(device)
+                l = self.calculate_loss(subgraph)
+                l.backward()
+
+                if self.update_steps == 1 or \
+                    (counter + 1) % self.update_steps == 0 or \
+                        counter + 1 == len(self.loader):
+                    self.optimizer.step()
+                    if self.optimizer2 is not None:
+                        self.optimizer2.step()
+                    self.optimizer.zero_grad()
+                    if self.optimizer2 is not None:
+                        self.optimizer2.zero_grad()
+
+                total_loss += l.item()
+                counter += 1
+                bar.set_postfix(loss=f'{l.item():.4f}')
+            total_loss /= counter
+        return total_loss
+    
+    def calculate_loss(self, input_batch, split="train"):
+        """Compute KG embedding loss and regularization loss.
+
+        Args:
+            input_batch: tuple containing a Data object with the subgraph and a torch sparse tensor with labels
+        Returns:
+            loss: torch.Tensor with embedding loss and regularization loss
+        """
+        if self.neg_sample_size > 0:
+            loss, factors = self.neg_sampling_loss(input_batch)
+        else:
+            subgraph, labels = self.dataset.make_subgraph(input_batch, split=split, return_labels=True)
+            # Make triples
+            queries = self.dataset.get_triples(subgraph)
+            predictions, factors = self.model(
+                queries = queries, tails=None,
+                x=subgraph.x,
+                edge_index=subgraph.edge_index[:, subgraph.train_mask],
+                edge_type=subgraph.edge_type[subgraph.train_mask],
+            )
+            if self.loss == "crossentropy":
+                truth = queries[:, 2]
+                loss = self.ce(predictions, truth.unsqueeze(1))
+            elif self.loss == "binarycrossentropy":
+                labels = input_batch[1].to_dense().unsqueeze(-1)
+                labels = (1.0 - self.smoothing) * labels.to(predictions.dtype) + self.smoothing / subgraph.num_nodes
+                loss = self.bce(predictions.sigmoid(), labels)
+
+        # regularization loss
+        loss += self.regularizer.forward(factors)
+        return loss
+    
+    def calculate_valid_loss(self, examples):
+        device = self.device
+        total_loss = 0.0
+        counter = 0
+        with torch.no_grad():
+            for batch in self.loader:
+                subgraph = batch.to(device)
+                l = self.calculate_loss(subgraph, split="val")
+                total_loss += l.item()
+                counter += 1
+            total_loss /= counter
+        return total_loss
+
+
+
 

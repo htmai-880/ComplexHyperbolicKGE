@@ -78,25 +78,33 @@ class MessagePassing(nn.Module):
         return aggr_out
     
     def compute_norm(self, edge_index, num_ent, drop=False):
-        row, _	= edge_index
-        edge_weight 	= torch.ones_like(row).float()
-        if drop:
-            edge_weight = self.drop(edge_weight)
-        deg		= scatter_add(edge_weight, row, dim=0, dim_size=num_ent)	# Summing number of weights of the edges
-        deg_inv		= deg.pow(-1)
-        deg_inv[deg_inv	== float('inf')] = 0
-        norm		= deg_inv[row] * edge_weight
+        with torch.no_grad():
+            row, _	= edge_index
+            edge_weight 	= torch.ones_like(row).float()
+            if drop:
+                edge_weight = self.drop(edge_weight)
+            deg		= scatter_add(edge_weight, row, dim=0, dim_size=num_ent)	# Summing number of weights of the edges
+            deg_inv		= deg.pow(-1)
+            deg_inv[deg_inv	== float('inf')] = 0
+            norm		= deg_inv[row] * edge_weight
         return norm
 
-    def compute_symmetric_norm(self, edge_index, num_ent, drop=False):
-        row, col	= edge_index
-        edge_weight 	= torch.ones_like(row).float()
-        if drop:
-            edge_weight = self.drop(edge_weight)
-        deg		= scatter_add(edge_weight, row, dim=0, dim_size=num_ent)	# Summing number of weights of the edges
-        deg_inv		= deg.pow(-0.5)
-        deg_inv[deg_inv	== float('inf')] = 0
-        norm		= deg_inv[row] * edge_weight * deg_inv[col]
+    def compute_symmetric_norm(self, edge_index, num_ent, drop=False, normalize_to_1=True):
+        with torch.no_grad():
+            row, col	= edge_index
+            edge_weight 	= torch.ones_like(row).float()
+            if drop:
+                edge_weight = self.drop(edge_weight)
+            deg		= scatter_add(edge_weight, row, dim=0, dim_size=num_ent) + scatter_add(edge_weight, col, dim=0, dim_size=num_ent) + 1	# Summing number of weights of the edges
+            deg_inv		= deg.pow(-0.5)
+            deg_inv[deg_inv	== float('inf')] = 0
+            norm		= deg_inv[row] * edge_weight * deg_inv[col]
+
+            # The weights do not sum up to 1 yet. Extra normalization would be helpful
+            if normalize_to_1:
+                # The inward messages are normalized by their weight sum
+                sum_norm = scatter(norm, row, dim=0, dim_size=num_ent) + 1/deg
+                norm = norm / sum_norm[row]
         return norm
 
     def get_regularizable_params(self):
