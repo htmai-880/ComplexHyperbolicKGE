@@ -186,7 +186,7 @@ def train(args):
         model = getattr(models, args.model)(args)
     total = count_params(model)
     logging.info("Total number of parameters {}".format(total))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
     model.eval()

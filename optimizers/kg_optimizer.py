@@ -48,7 +48,7 @@ class KGOptimizer(object):
         self.bce = nn.BCELoss(reduction='mean')
         self.neg_sample_size = neg_sample_size
         self.n_entities = model.sizes[0]
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         # self.device = torch.device("cpu")
         self.smoothing = smoothing
         self.loss = loss
@@ -338,14 +338,12 @@ class KGOptimizerSubgraph(KGOptimizer):
         Returns:
             loss: torch.Tensor with loss averaged over all training examples
         """
-        device = self.device
         with tqdm.tqdm(self.loader, unit='batch', disable=not self.verbose) as bar:
             bar.set_description(f'train loss')
             total_loss = 0.0
             counter = 0
             for batch in bar:
-                subgraph = batch.to(device)
-                l = self.calculate_loss(subgraph)
+                l = self.calculate_loss(batch.to(self.dataset.g_device))
                 l.backward()
 
                 if self.update_steps == 1 or \
@@ -377,7 +375,9 @@ class KGOptimizerSubgraph(KGOptimizer):
         else:
             subgraph, labels = self.dataset.make_subgraph(input_batch, split=split, return_labels=True)
             # Make triples
-            queries = self.dataset.get_triples(subgraph)
+            queries = self.dataset.get_triples(subgraph).to(self.device)
+            subgraph = subgraph.to(self.device)
+
             predictions, factors = self.model(
                 queries = queries, tails=None,
                 x=subgraph.x,
@@ -388,7 +388,7 @@ class KGOptimizerSubgraph(KGOptimizer):
                 truth = queries[:, 2]
                 loss = self.ce(predictions, truth.unsqueeze(1))
             elif self.loss == "binarycrossentropy":
-                labels = input_batch[1].to_dense().unsqueeze(-1)
+                labels = labels.to(self.device).to_dense().unsqueeze(-1)
                 labels = (1.0 - self.smoothing) * labels.to(predictions.dtype) + self.smoothing / subgraph.num_nodes
                 loss = self.bce(predictions.sigmoid(), labels)
 
@@ -397,17 +397,37 @@ class KGOptimizerSubgraph(KGOptimizer):
         return loss
     
     def calculate_valid_loss(self, examples):
-        device = self.device
-        total_loss = 0.0
-        counter = 0
+        labels = self.dataset.make_labels(
+            self.dataset.g,
+            split="train",
+            triples=examples
+        )
         with torch.no_grad():
-            for batch in self.loader:
-                subgraph = batch.to(device)
-                l = self.calculate_loss(subgraph, split="val")
-                total_loss += l.item()
+            b_begin = 0
+            loss = 0.0
+            counter = 0
+            while b_begin < examples.shape[0]:
+                input_batch = examples[b_begin:b_begin + self.batch_size].to(self.device)
+                b_top = min(b_begin + self.batch_size, examples.shape[0])
+                r = torch.arange(start=b_begin, end=b_top, device=labels.device)
+                input_label = torch.index_select(labels, 0, r).to(self.device)
+                b_begin += self.batch_size
+
+                predictions, factors = self.model(
+                    queries = input_batch, tails=None
+                )
+                if self.loss == "crossentropy":
+                    truth = input_batch[:, 2]
+                    loss += self.ce(predictions, truth.unsqueeze(1))
+                elif self.loss == "binarycrossentropy":
+                    input_label = input_label.to_dense().unsqueeze(-1)
+                    input_label = (1.0 - self.smoothing) * input_label.to(predictions.dtype) + self.smoothing / self.dataset.n_entities
+                    loss += self.bce(predictions.sigmoid(), input_label)
+
                 counter += 1
-            total_loss /= counter
-        return total_loss
+                loss += self.regularizer.forward(factors)
+        loss /= counter
+        return loss
 
 
 

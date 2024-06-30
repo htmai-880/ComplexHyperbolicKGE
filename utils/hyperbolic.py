@@ -150,7 +150,7 @@ def lorentz_boost(y, v, c):
     # we want norm(v) < 1.
 
     norm_v = v.norm(dim=-1, p=2, keepdim=True)
-    v = v / (1+norm_v)
+    v = tanh(norm_v) * torch.nn.functional.normalize(v, dim=-1)
 
     y0 = torch.sum(y**2, dim=-1, keepdim=True) + 1/c
     y0 = torch.sqrt(y0)
@@ -244,6 +244,20 @@ def hyp_distance_multi_c_lorentz(x, v, c):
 #### OTHER ####
 
 def explicit_lorentz(x, c):
+    """Append the time-like coordinate to vectors in the hyperboloid of curvature c.
+
+    Parameters
+    ----------
+    x : tensor
+        (*, D) tensor containing space-like components of vectors in the hyperboloid
+    c : tensor
+        (*, 1) or (1,) tensor containing the curvatures of the hyperboloids
+
+    Returns
+    -------
+    tensor
+        (*, D+1) vector containing vectors in the hyperboloid of curvature c
+    """
     x0 = torch.sum(x * x, dim=-1, keepdim=True)
     x0 = torch.sqrt(x0 + 1/c)
     return torch.cat([x0, x], dim=-1)

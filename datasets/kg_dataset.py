@@ -155,6 +155,7 @@ class KGDataset3(KGDataset):
         all_triples = torch.from_numpy(all_triples.astype("int64"))
         train_mask = torch.zeros(all_triples.size(0), dtype=torch.bool)
         train_mask[:train_examples.shape[0]] = True
+        self.g_device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.g = Data(
             x = torch.arange(self.n_entities).unsqueeze(-1),
             edge_index=all_triples[:, [0, 2]].t().contiguous(),
@@ -162,7 +163,7 @@ class KGDataset3(KGDataset):
             train_mask=train_mask,
             val_mask=~train_mask,
             num_nodes=self.n_entities
-        )
+        ).to(self.g_device)
         print("PyG Graph: ", self.g)
 
     def make_loader(self, batch_size=4, shuffle=True, num_workers=-1, split="train"):
@@ -174,8 +175,25 @@ class KGDataset3(KGDataset):
             shuffle=shuffle,
             num_workers=num_workers
         )
+    def _make_labels(self, edge_type, edge_index, num_nodes, queries=None):
+        q = edge_index[0] * self.n_predicates + edge_type
+        targets = edge_index[1]
+        ind = torch.stack([q, targets]).to(q.device)
+        labels = torch.sparse_coo_tensor(
+            indices=ind,
+            values=torch.ones_like(q),
+            size=(self.n_predicates * num_nodes, num_nodes),
+            device=q.device
+        )
+        if queries is None:
+            return torch.index_select(labels, 0, q)
+        # Otherwise, hash the queries as well
+        queries = queries.to(labels.device)
+        queries = queries[:, 0] * self.n_predicates + queries[:, 1]
+        return torch.index_select(labels, 0, queries)
+
     
-    def make_labels(self, subgraph_g, split="train"):
+    def make_labels(self, subgraph_g, split="train", triples=None):
         """Make a B x N sparse tensor containing the labels for each edge in the subgraph. B is the number of queries and N is the number of nodes in the subgraph.
 
         Args:
@@ -185,7 +203,6 @@ class KGDataset3(KGDataset):
         Returns:
             torch.sparse.FloatTensor: The labels for each edge in the subgraph. output[i, j] = 1 if the j-th node is the target of the i-th query.
         """
-        n_predicates = self.n_predicates
         if split == "train":
             edge_index = subgraph_g.edge_index[:, subgraph_g.train_mask]
             edge_type = subgraph_g.edge_type[subgraph_g.train_mask]
@@ -195,16 +212,8 @@ class KGDataset3(KGDataset):
         else:
             edge_index = subgraph_g.edge_index
             edge_type = subgraph_g.edge_type
-        queries = edge_index[0] * n_predicates + edge_type
-        targets = edge_index[1]
-        ind = torch.stack([queries, targets]).to(queries.device)
-        labels = torch.sparse_coo_tensor(
-            indices=ind,
-            values=torch.ones_like(queries),
-            size=(n_predicates * subgraph_g.num_nodes, subgraph_g.num_nodes),
-            device=queries.device
-        )
-        return torch.index_select(labels, 0, queries)
+        return self._make_labels(edge_type, edge_index, num_nodes=subgraph_g.num_nodes, queries=triples)
+
 
 
     def make_subgraph(self, batch, split="train", return_labels=False):
