@@ -327,7 +327,7 @@ class KGOptimizerSubgraph(KGOptimizer):
                                                   update_steps=update_steps, neg_sample_size=neg_sample_size, double_neg=double_neg,
                                                     optimizer2=optimizer2, loss=loss, smoothing=smoothing, verbose=verbose)
         self.dataset = dataset
-        self.loader = self.dataset.make_loader(batch_size=8, shuffle=True, num_workers=4)
+        self.loader = self.dataset.make_loader(batch_size=16, shuffle=True, num_workers=4)
 
     def epoch(self, examples):
         """Runs one epoch of training KG embedding model.
@@ -343,26 +343,14 @@ class KGOptimizerSubgraph(KGOptimizer):
             total_loss = 0.0
             counter = 0
             for batch in bar:
-                l = self.calculate_loss(batch.to(self.dataset.g_device))
-                l.backward()
-
-                if self.update_steps == 1 or \
-                    (counter + 1) % self.update_steps == 0 or \
-                        counter + 1 == len(self.loader):
-                    self.optimizer.step()
-                    if self.optimizer2 is not None:
-                        self.optimizer2.step()
-                    self.optimizer.zero_grad()
-                    if self.optimizer2 is not None:
-                        self.optimizer2.zero_grad()
-
-                total_loss += l.item()
+                l = self.calculate_loss(batch.to(self.dataset.g_device), optimizer=self.optimizer)
+                total_loss += l
                 counter += 1
-                bar.set_postfix(loss=f'{l.item():.4f}')
+                bar.set_postfix(loss=f'{l:.4f}')
             total_loss /= counter
         return total_loss
     
-    def calculate_loss(self, input_batch, split="train"):
+    def calculate_loss(self, input_batch, split="train", optimizer=None):
         """Compute KG embedding loss and regularization loss.
 
         Args:
@@ -375,26 +363,52 @@ class KGOptimizerSubgraph(KGOptimizer):
         else:
             subgraph, labels = self.dataset.make_subgraph(input_batch, split=split, return_labels=True)
             # Make triples
-            queries = self.dataset.get_triples(subgraph).to(self.device)
+            queries = self.dataset.get_triples(subgraph)
             subgraph = subgraph.to(self.device)
 
-            predictions, factors = self.model(
-                queries = queries, tails=None,
-                x=subgraph.x,
-                edge_index=subgraph.edge_index[:, subgraph.train_mask],
-                edge_type=subgraph.edge_type[subgraph.train_mask],
-            )
-            if self.loss == "crossentropy":
-                truth = queries[:, 2]
-                loss = self.ce(predictions, truth.unsqueeze(1))
-            elif self.loss == "binarycrossentropy":
-                labels = labels.to(self.device).to_dense().unsqueeze(-1)
-                labels = (1.0 - self.smoothing) * labels.to(predictions.dtype) + self.smoothing / subgraph.num_nodes
-                loss = self.bce(predictions.sigmoid(), labels)
+            # Here, we can process the subgraph by minibatch
+            batch_size = self.batch_size
+            b_begin = 0
+            total_subgraph_loss = 0.0
+            counter = 0
 
+            while b_begin < queries.shape[0]:
+                queries_batch = queries[b_begin:b_begin + batch_size].to(self.device)
+                labels_batch = torch.index_select(
+                    labels,
+                    0,
+                    torch.arange(start=b_begin, end=min(b_begin + batch_size, queries.shape[0]), device=labels.device)
+                )
+                predictions, factors = self.model(
+                    queries = queries_batch, tails=None,
+                    x=subgraph.x,
+                    edge_index=subgraph.edge_index[:, subgraph.train_mask],
+                    edge_type=subgraph.edge_type[subgraph.train_mask],
+                )
+                if self.loss == "crossentropy":
+                    truth = queries_batch[:, 2]
+                    loss = self.ce(predictions, truth.unsqueeze(1))
+                elif self.loss == "binarycrossentropy":
+                    labels_batch = labels_batch.to(self.device).to_dense().unsqueeze(-1)
+                    labels_batch = (1.0 - self.smoothing) * labels_batch.to(predictions.dtype) + self.smoothing / subgraph.num_nodes
+                    loss = self.bce(predictions.sigmoid(), labels_batch)
+                loss += self.regularizer.forward(factors)
+                if optimizer is not None:
+                    if self.update_steps == 1 or \
+                        (counter + 1) % self.update_steps == 0 or \
+                            b_begin + self.batch_size >= queries.shape[0]:
+                        self.optimizer.step()
+                        if self.optimizer2 is not None:
+                            self.optimizer2.step()
+                        self.optimizer.zero_grad()
+                        if self.optimizer2 is not None:
+                            self.optimizer2.zero_grad()
+                
+                b_begin += batch_size
+                counter += 1
+                total_subgraph_loss += loss.item()
         # regularization loss
-        loss += self.regularizer.forward(factors)
-        return loss
+        return total_subgraph_loss / counter
     
     def calculate_valid_loss(self, examples):
         labels = self.dataset.make_labels(
