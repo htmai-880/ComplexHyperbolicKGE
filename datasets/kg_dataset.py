@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import scipy.sparse as sp
 from .sparse import SparseDataset, sparse_batch_collate
+from utils.pyg_utils import make_subgraph
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 from torch_geometric.data import Data
 from torch_geometric.loader import LinkNeighborLoader
@@ -182,17 +183,25 @@ class KGDataset3(KGDataset):
         q = edge_index[0] * self.n_predicates + edge_type
         targets = edge_index[1]
         ind = torch.stack([q, targets]).to(q.device)
-        labels = torch.sparse_coo_tensor(
-            indices=ind,
-            values=torch.ones_like(q),
-            size=(self.n_predicates * num_nodes, num_nodes),
-            device=q.device
-        )
         if queries is None:
+            labels = torch.sparse_coo_tensor(
+                indices=ind,
+                values=torch.ones_like(q),
+                size=(self.n_predicates * num_nodes, num_nodes),
+                device=q.device
+            )
             return torch.index_select(labels, 0, q)
         # Otherwise, hash the queries as well
         queries = queries.to(labels.device)
-        queries = queries[:, 0] * self.n_predicates + queries[:, 1]
+        queries_hash = queries[:, 0] * self.n_predicates + queries[:, 1]
+        ind_new = torch.stack([queries_hash, queries[:, 2]]).to(q.device)
+        ind = torch.cat([ind, ind_new], dim=1)
+        labels = torch.sparse_coo_tensor(
+            indices=ind,
+            values=torch.ones_like(ind[0]),
+            size=(self.n_predicates * num_nodes, num_nodes),
+            device=q.device
+        )
         return torch.index_select(labels, 0, queries)
 
     
@@ -218,12 +227,12 @@ class KGDataset3(KGDataset):
         return self._make_labels(edge_type, edge_index, num_nodes=subgraph_g.num_nodes, queries=triples)
 
 
-
     def make_subgraph(self, batch, split="train", return_labels=False):
         # Retrieve the triples
         src, dist, e_type = batch.n_id[batch.edge_label_index[0]], batch.n_id[batch.edge_label_index[1]], batch.edge_label
         triples = torch.stack([src, e_type, dist], dim=1)
-        subgraph_g = self.g.subgraph(batch.n_id) # Note: this subgraph is more complete than the one in input
+        subgraph_g = make_subgraph(self.g, batch.n_id, exclude=batch.input_id, account_for_train_mask=True)
+        # Note: this subgraph is more complete than the one in input
         if not return_labels:
             return (subgraph_g,triples)
         labels = self.make_labels(subgraph_g, split=split, triples=triples)
