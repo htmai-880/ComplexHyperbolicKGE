@@ -11,6 +11,8 @@ from .sparse import SparseDataset, sparse_batch_collate
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 from torch_geometric.data import Data
 from torch_geometric.loader import LinkNeighborLoader
+from torch_geometric.utils.map import map_index
+from torch_geometric.utils.num_nodes import maybe_num_nodes
 
 class KGDataset(object):
     """Knowledge Graph dataset class."""
@@ -172,6 +174,7 @@ class KGDataset3(KGDataset):
             num_neighbors=[20,20,10],
             batch_size=batch_size,
             edge_label_index=self.g.edge_index[:, self.g.train_mask] if split=="train" else self.g.edge_index,
+            edge_label = self.g.edge_type[self.g.train_mask] if split=="train" else self.g.edge_type,
             shuffle=shuffle,
             num_workers=num_workers
         )
@@ -217,11 +220,14 @@ class KGDataset3(KGDataset):
 
 
     def make_subgraph(self, batch, split="train", return_labels=False):
+        # Retrieve the triples
+        src, dist, e_type = batch.n_id[batch.edge_label_index[0]], batch.n_id[batch.edge_label_index[1]], batch.edge_label
+        triples = torch.stack([src, e_type, dist], dim=1)
         subgraph_g = self.g.subgraph(batch.n_id) # Note: this subgraph is more complete than the one in input
         if not return_labels:
-            return (subgraph_g,)
-        labels = self.make_labels(subgraph_g, split=split)
-        return subgraph_g, labels
+            return (subgraph_g,triples)
+        labels = self.make_labels(subgraph_g, split=split, triples=triples)
+        return subgraph_g, triples, labels
     
     def get_triples(self, subgraph, split="train"):
         edge_index = subgraph.edge_index[:, subgraph.train_mask] if split == "train" else subgraph.edge_index

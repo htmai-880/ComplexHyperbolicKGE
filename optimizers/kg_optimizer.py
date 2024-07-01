@@ -327,7 +327,7 @@ class KGOptimizerSubgraph(KGOptimizer):
                                                   update_steps=update_steps, neg_sample_size=neg_sample_size, double_neg=double_neg,
                                                     optimizer2=optimizer2, loss=loss, smoothing=smoothing, verbose=verbose)
         self.dataset = dataset
-        self.loader = self.dataset.make_loader(batch_size=16, shuffle=True, num_workers=4)
+        self.loader = self.dataset.make_loader(batch_size=self.batch_size, shuffle=True, num_workers=4)
 
     def epoch(self, examples):
         """Runs one epoch of training KG embedding model.
@@ -361,9 +361,8 @@ class KGOptimizerSubgraph(KGOptimizer):
         if self.neg_sample_size > 0:
             loss, factors = self.neg_sampling_loss(input_batch)
         else:
-            subgraph, labels = self.dataset.make_subgraph(input_batch, split=split, return_labels=True)
+            subgraph, queries, labels = self.dataset.make_subgraph(input_batch, split=split, return_labels=True)
             # Make triples
-            queries = self.dataset.get_triples(subgraph)
             subgraph = subgraph.to(self.device)
 
             # Here, we can process the subgraph by minibatch
