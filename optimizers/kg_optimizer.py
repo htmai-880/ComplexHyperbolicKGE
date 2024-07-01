@@ -393,6 +393,7 @@ class KGOptimizerSubgraph(KGOptimizer):
                     loss = self.bce(predictions.sigmoid(), labels_batch)
                 loss += self.regularizer.forward(factors)
                 if optimizer is not None:
+                    loss.backward()
                     if self.update_steps == 1 or \
                         (counter + 1) % self.update_steps == 0 or \
                             b_begin + self.batch_size >= queries.shape[0]:
