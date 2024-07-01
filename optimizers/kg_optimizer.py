@@ -380,7 +380,6 @@ class KGOptimizerSubgraph(KGOptimizer):
             # Here, we can process the subgraph by minibatch
             queries_batch = queries.to(self.device)
             labels_batch = labels.to(self.device)
-
             predictions, factors = self.model(
                 queries = queries_batch, tails=None,
                 x=subgraph.x,

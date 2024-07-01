@@ -230,7 +230,7 @@ class KGDataset3(KGDataset):
     def make_subgraph(self, batch, split="train", return_labels=False):
         # Retrieve the triples
         src, dist, e_type = batch.n_id[batch.edge_label_index[0]], batch.n_id[batch.edge_label_index[1]], batch.edge_label
-        batch_triples = torch.stack([src, e_type, dist], dim=1)
+        batch_triples = torch.stack([src, dist], dim=1)
         num_nodes = maybe_num_nodes(self.g.edge_index, num_nodes=self.g.num_nodes)
         batch_triples, _ = map_index(
             batch_triples.view(-1),
@@ -239,6 +239,9 @@ class KGDataset3(KGDataset):
             inclusive=True
         )
         batch_triples = batch_triples.view(2, -1)
+        batch_triples = torch.stack([
+            batch_triples[0], batch.edge_label, batch_triples[1]
+        ], dim=1)
         subgraph_g, _ = make_subgraph(self.g, batch.n_id, exclude=batch.input_id, account_for_train_mask=True)
         # Note: this subgraph is more complete than the one in input
         if not return_labels:
