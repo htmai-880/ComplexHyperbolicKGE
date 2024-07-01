@@ -327,7 +327,7 @@ class KGOptimizerSubgraph(KGOptimizer):
                                                   update_steps=update_steps, neg_sample_size=neg_sample_size, double_neg=double_neg,
                                                     optimizer2=optimizer2, loss=loss, smoothing=smoothing, verbose=verbose)
         self.dataset = dataset
-        self.loader = self.dataset.make_loader(batch_size=16, shuffle=True, num_workers=4)
+        self.loader = self.dataset.make_loader(batch_size=128, shuffle=True, num_workers=4)
 
     def epoch(self, examples):
         """Runs one epoch of training KG embedding model.
@@ -394,6 +394,7 @@ class KGOptimizerSubgraph(KGOptimizer):
                     loss = self.bce(predictions.sigmoid(), labels_batch)
                 loss += self.regularizer.forward(factors)
                 if optimizer is not None:
+                    loss.backward()
                     if self.update_steps == 1 or \
                         (counter + 1) % self.update_steps == 0 or \
                             b_begin + self.batch_size >= queries.shape[0]:
