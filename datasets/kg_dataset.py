@@ -172,7 +172,7 @@ class KGDataset3(KGDataset):
     def make_loader(self, batch_size=4, shuffle=True, num_workers=-1, split="train"):
         return LinkNeighborLoader(
             self.g,
-            num_neighbors=[20,20,10],
+            num_neighbors=[20,20],
             batch_size=batch_size,
             edge_label_index=self.g.edge_index[:, self.g.train_mask] if split=="train" else self.g.edge_index,
             edge_label = self.g.edge_type[self.g.train_mask] if split=="train" else self.g.edge_type,
@@ -192,7 +192,7 @@ class KGDataset3(KGDataset):
             )
             return torch.index_select(labels, 0, q)
         # Otherwise, hash the queries as well
-        queries = queries.to(labels.device)
+        queries = queries.to(q.device)
         queries_hash = queries[:, 0] * self.n_predicates + queries[:, 1]
         ind_new = torch.stack([queries_hash, queries[:, 2]]).to(q.device)
         ind = torch.cat([ind, ind_new], dim=1)
@@ -202,7 +202,7 @@ class KGDataset3(KGDataset):
             size=(self.n_predicates * num_nodes, num_nodes),
             device=q.device
         )
-        return torch.index_select(labels, 0, queries)
+        return torch.index_select(labels, 0, queries_hash)
 
     
     def make_labels(self, subgraph_g, split="train", triples=None):
@@ -230,13 +230,21 @@ class KGDataset3(KGDataset):
     def make_subgraph(self, batch, split="train", return_labels=False):
         # Retrieve the triples
         src, dist, e_type = batch.n_id[batch.edge_label_index[0]], batch.n_id[batch.edge_label_index[1]], batch.edge_label
-        triples = torch.stack([src, e_type, dist], dim=1)
-        subgraph_g = make_subgraph(self.g, batch.n_id, exclude=batch.input_id, account_for_train_mask=True)
+        batch_triples = torch.stack([src, e_type, dist], dim=1)
+        num_nodes = maybe_num_nodes(self.g.edge_index, num_nodes=self.g.num_nodes)
+        batch_triples, _ = map_index(
+            batch_triples.view(-1),
+            index=batch.n_id,
+            max_index=num_nodes,
+            inclusive=True
+        )
+        batch_triples = batch_triples.view(2, -1)
+        subgraph_g, _ = make_subgraph(self.g, batch.n_id, exclude=batch.input_id, account_for_train_mask=True)
         # Note: this subgraph is more complete than the one in input
         if not return_labels:
-            return (subgraph_g,triples)
-        labels = self.make_labels(subgraph_g, split=split, triples=triples)
-        return subgraph_g, triples, labels
+            return (subgraph_g, batch_triples)
+        labels = self.make_labels(subgraph_g, split=split, triples=batch_triples)
+        return subgraph_g, batch_triples, labels
     
     def get_triples(self, subgraph, split="train"):
         edge_index = subgraph.edge_index[:, subgraph.train_mask] if split == "train" else subgraph.edge_index

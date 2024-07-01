@@ -101,9 +101,9 @@ def make_subgraph(g, subset, exclude=None, account_for_train_mask=True) -> Data:
     if not exclude is None:
         if account_for_train_mask:
             # exclude contains batch.input_id, which is only valid with the train_mask
-            exclude_ = torch.zeros(g.train_mask.sum(), dtype=torch.bool)
+            exclude_ = torch.zeros(g.train_mask.sum(), dtype=torch.bool, device=g.edge_index.device)
             exclude_[exclude] = True
-            exclude = torch.zeros(g.num_edges, dtype=torch.bool)
+            exclude = torch.zeros(g.num_edges, dtype=torch.bool, device=exclude_.device)
             exclude[g.train_mask] = exclude_
         else:
             exclude_ = torch.zeros(g.num_edges, dtype=torch.bool)
